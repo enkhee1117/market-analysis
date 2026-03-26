@@ -8,7 +8,7 @@ on:
 
 jobs:
   test:
-    name: Run tests (Python 3.12)
+    name: Test & Deploy Smoke Check (Python 3.12)
     runs-on: ubuntu-latest
 
     steps:
@@ -21,11 +21,26 @@ jobs:
           python-version: "3.12"
           cache: "pip"
 
-      - name: Install dependencies
-        run: pip install -r requirements.txt pytest packaging
+      - name: Install dependencies (exactly as Streamlit Cloud does)
+        run: pip install -r requirements.txt
+
+      - name: Install test dependencies
+        run: pip install pytest
+
+      - name: Smoke test — all app imports work
+        run: python -c "
+          from modules.data_fetcher import fetch_price_history, fetch_multi_tickers, fetch_options_chain, TIMEFRAME_MAP;
+          from modules.day_of_week import compute_dow_returns, RETURN_TYPES, TIMEFRAMES, dow_summary;
+          from modules.gamma_exposure import compute_gex, gex_flip_point, total_gex_metrics, plot_gex_profile, plot_gex_by_expiration;
+          from modules.vix_analysis import compute_vix_metrics, plot_vix_panel, plot_vvix_vix_ratio, plot_vix_zscore, vix_summary_stats;
+          from modules.seasonality import compute_returns, monthly_seasonality, plot_monthly_bar, plot_monthly_heatmap;
+          print('All module imports OK')
+          "
+
+      - name: Verify runtime.txt format
+        run: |
+          grep -qE '^python-3\.[0-9]+\.[0-9]+$' runtime.txt || (echo "ERROR: runtime.txt must be format python-X.Y.Z" && exit 1)
+          echo "runtime.txt format OK: $(cat runtime.txt)"
 
       - name: Run test suite
         run: pytest tests/ -v --tb=short
-
-      - name: Smoke test — verify all imports
-        run: pytest tests/test_imports.py -v
