@@ -319,12 +319,18 @@ with tab2:
                 "net_gex_b":  "Net GEX ($B)",
             }
         )
+        def _gex_color(v):
+            try:
+                f = float(v)
+                return "color: #5FC97B" if f > 0 else ("color: #E85C5C" if f < 0 else "")
+            except (TypeError, ValueError):
+                return ""
         st.dataframe(
             sub_gex_disp.style.format({
                 "Call GEX ($B)": "{:.4f}",
                 "Put GEX ($B)":  "{:.4f}",
                 "Net GEX ($B)":  "{:.4f}",
-            }).background_gradient(subset=["Net GEX ($B)"], cmap="RdYlGn"),
+            }).map(_gex_color, subset=["Net GEX ($B)"]),
             use_container_width=True, hide_index=True,
         )
 
@@ -462,12 +468,18 @@ with tab4:
 
     # Monthly stats table
     with st.expander("Monthly Statistics Table"):
+        def _seasonal_color(v):
+            try:
+                f = float(v)
+                return "color: #5FC97B" if f > 0 else ("color: #E85C5C" if f < 0 else "")
+            except (TypeError, ValueError):
+                return ""
         st.dataframe(
             monthly_df.style.format({
                 "Mean %": "{:+.3f}", "Median %": "{:+.3f}",
                 "Win Rate %": "{:.1f}", "Std %": "{:.3f}",
                 "t-stat": "{:.3f}", "p-value": "{:.4f}",
-            }).background_gradient(subset=["Mean %", "Win Rate %"], cmap="RdYlGn"),
+            }).map(_seasonal_color, subset=["Mean %", "Win Rate %"]),
             use_container_width=True, hide_index=True,
         )
 
