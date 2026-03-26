@@ -26,15 +26,28 @@ TIMEFRAMES = {
 }
 
 
+RETURN_TYPES = {
+    "Close-to-Close": "Return",
+    "Open-to-Close (Intraday)": "Intraday",
+    "Overnight (Close-to-Open)": "Overnight",
+}
+
+
 def compute_dow_returns(df: pd.DataFrame) -> pd.DataFrame:
-    """Compute daily returns and annotate with day-of-week."""
+    """Compute daily returns (close-to-close, intraday, overnight) and annotate with day-of-week."""
     close = df["Close"].squeeze()
-    returns = close.pct_change() * 100  # percent
+    open_ = df["Open"].squeeze()
+    returns = close.pct_change() * 100  # close-to-close %
+    intraday = (close - open_) / open_ * 100  # open-to-close %
+    overnight = (open_ - close.shift(1)) / close.shift(1) * 100  # prev close to open %
     result = pd.DataFrame({
-        "Close":   close,
-        "Return":  returns,
+        "Close":     close,
+        "Open":      open_,
+        "Return":    returns,
+        "Intraday":  intraday,
+        "Overnight": overnight,
         "DayOfWeek": close.index.dayofweek,
-        "DayName": [DAY_NAMES.get(d, "Other") for d in close.index.dayofweek],
+        "DayName":   [DAY_NAMES.get(d, "Other") for d in close.index.dayofweek],
     }, index=close.index)
     return result.dropna(subset=["Return"])
 
@@ -46,11 +59,11 @@ def filter_by_timeframe(df: pd.DataFrame, label: str) -> pd.DataFrame:
     return df[df.index >= cutoff]
 
 
-def dow_summary(df: pd.DataFrame, days: list) -> pd.DataFrame:
+def dow_summary(df: pd.DataFrame, days: list, return_col: str = "Return") -> pd.DataFrame:
     """Return summary stats per day-of-week for the given day names."""
     rows = []
     for day in days:
-        sub = df[df["DayName"] == day]["Return"].dropna()
+        sub = df[df["DayName"] == day][return_col].dropna()
         if len(sub) == 0:
             continue
         rows.append({
@@ -66,7 +79,8 @@ def dow_summary(df: pd.DataFrame, days: list) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def plot_dow_comparison(all_data: pd.DataFrame, selected_days: list, timeframes: list) -> go.Figure:
+def plot_dow_comparison(all_data: pd.DataFrame, selected_days: list, timeframes: list,
+                        return_col: str = "Return") -> go.Figure:
     """
     Grouped bar chart: X = timeframe, groups = day of week.
     Shows mean daily return for each day across timeframes.
@@ -75,7 +89,7 @@ def plot_dow_comparison(all_data: pd.DataFrame, selected_days: list, timeframes:
     for tf_label in timeframes:
         sub = filter_by_timeframe(all_data, tf_label)
         for day in selected_days:
-            day_data = sub[sub["DayName"] == day]["Return"].dropna()
+            day_data = sub[sub["DayName"] == day][return_col].dropna()
             if len(day_data) == 0:
                 continue
             rows.append({
@@ -125,13 +139,14 @@ def plot_dow_comparison(all_data: pd.DataFrame, selected_days: list, timeframes:
     return fig
 
 
-def plot_win_rate_comparison(all_data: pd.DataFrame, selected_days: list, timeframes: list) -> go.Figure:
+def plot_win_rate_comparison(all_data: pd.DataFrame, selected_days: list, timeframes: list,
+                             return_col: str = "Return") -> go.Figure:
     """Bar chart of win rates by timeframe and day."""
     rows = []
     for tf_label in timeframes:
         sub = filter_by_timeframe(all_data, tf_label)
         for day in selected_days:
-            day_data = sub[sub["DayName"] == day]["Return"].dropna()
+            day_data = sub[sub["DayName"] == day][return_col].dropna()
             if len(day_data) == 0:
                 continue
             rows.append({
@@ -182,12 +197,13 @@ def plot_win_rate_comparison(all_data: pd.DataFrame, selected_days: list, timefr
     return fig
 
 
-def plot_dow_distribution(all_data: pd.DataFrame, selected_days: list, timeframe: str) -> go.Figure:
+def plot_dow_distribution(all_data: pd.DataFrame, selected_days: list, timeframe: str,
+                          return_col: str = "Return") -> go.Figure:
     """Violin/box plot showing return distribution per selected day."""
     sub = filter_by_timeframe(all_data, timeframe)
     fig = go.Figure()
     for day in selected_days:
-        day_data = sub[sub["DayName"] == day]["Return"].dropna()
+        day_data = sub[sub["DayName"] == day][return_col].dropna()
         if len(day_data) == 0:
             continue
         color = DAY_COLORS.get(day, "#888888")
@@ -213,12 +229,13 @@ def plot_dow_distribution(all_data: pd.DataFrame, selected_days: list, timeframe
     return fig
 
 
-def plot_cumulative_by_dow(all_data: pd.DataFrame, selected_days: list, timeframe: str) -> go.Figure:
+def plot_cumulative_by_dow(all_data: pd.DataFrame, selected_days: list, timeframe: str,
+                           return_col: str = "Return") -> go.Figure:
     """Cumulative return if you only invested on specific days."""
     sub = filter_by_timeframe(all_data, timeframe).copy()
     fig = go.Figure()
     for day in selected_days:
-        day_data = sub[sub["DayName"] == day]["Return"].dropna() / 100
+        day_data = sub[sub["DayName"] == day][return_col].dropna() / 100
         cumret = (1 + day_data).cumprod() - 1
         cumret *= 100
         color = DAY_COLORS.get(day, "#888888")

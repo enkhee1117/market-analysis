@@ -27,6 +27,7 @@ from modules.day_of_week import (
     plot_dow_distribution,
     plot_cumulative_by_dow,
     TIMEFRAMES,
+    RETURN_TYPES,
 )
 from modules.gamma_exposure import (
     compute_gex,
@@ -137,6 +138,16 @@ with tab1:
     st.title("Day of Week Performance")
     st.markdown("Analyze how SPY (or selected ETF) performs on specific weekdays across different timeframes.")
 
+    # Return type selector
+    return_type_label = st.radio(
+        "Return Type",
+        list(RETURN_TYPES.keys()),
+        index=0,
+        horizontal=True,
+        help="Close-to-Close = full daily return. Intraday = open-to-close. Overnight = previous close-to-open.",
+    )
+    return_col = RETURN_TYPES[return_type_label]
+
     c1, c2, c3 = st.columns([1, 1, 2])
     with c1:
         selected_days = st.multiselect(
@@ -175,10 +186,10 @@ with tab1:
 
     # Summary table for selected distribution timeframe
     filtered = filter_by_timeframe(dow_data, dist_timeframe)
-    summary  = dow_summary(filtered, selected_days)
+    summary  = dow_summary(filtered, selected_days, return_col=return_col)
 
     if not summary.empty:
-        st.subheader(f"Summary Stats — {dist_timeframe}")
+        st.subheader(f"Summary Stats — {dist_timeframe}  |  {return_type_label}")
         cols = st.columns(len(summary))
         for col, (_, row) in zip(cols, summary.iterrows()):
             with col:
@@ -197,23 +208,23 @@ with tab1:
 
     # Main comparison chart
     st.subheader("Mean Return by Timeframe")
-    fig_cmp = plot_dow_comparison(dow_data, selected_days, selected_timeframes)
+    fig_cmp = plot_dow_comparison(dow_data, selected_days, selected_timeframes, return_col=return_col)
     st.plotly_chart(fig_cmp, use_container_width=True)
 
     # Win rate chart
     st.subheader("Win Rate by Timeframe")
-    fig_wr = plot_win_rate_comparison(dow_data, selected_days, selected_timeframes)
+    fig_wr = plot_win_rate_comparison(dow_data, selected_days, selected_timeframes, return_col=return_col)
     st.plotly_chart(fig_wr, use_container_width=True)
 
     col_a, col_b = st.columns(2)
     with col_a:
         st.subheader("Return Distribution")
-        fig_dist = plot_dow_distribution(dow_data, selected_days, dist_timeframe)
+        fig_dist = plot_dow_distribution(dow_data, selected_days, dist_timeframe, return_col=return_col)
         st.plotly_chart(fig_dist, use_container_width=True)
 
     with col_b:
         st.subheader("Cumulative Return (Day-Only Strategy)")
-        fig_cum = plot_cumulative_by_dow(dow_data, selected_days, dist_timeframe)
+        fig_cum = plot_cumulative_by_dow(dow_data, selected_days, dist_timeframe, return_col=return_col)
         st.plotly_chart(fig_cum, use_container_width=True)
 
 
