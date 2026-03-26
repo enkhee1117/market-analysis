@@ -195,12 +195,22 @@ with tab1:
             with col:
                 colored_metric(row["Day"], f"{row['Mean %']:+.3f}", "%",
                                sub=f"Win Rate: {row['Win Rate']}%  |  n={row['Count']}")
+        def _color_val(v):
+            try:
+                f = float(v)
+                if f > 0:
+                    return "color: #5FC97B"
+                elif f < 0:
+                    return "color: #E85C5C"
+            except (TypeError, ValueError):
+                pass
+            return ""
         st.dataframe(
             summary.style.format({
                 "Mean %": "{:+.3f}", "Median %": "{:+.3f}",
                 "Win Rate": "{:.1f}%", "Std %": "{:.3f}",
                 "Best %": "{:+.2f}", "Worst %": "{:+.2f}",
-            }).background_gradient(subset=["Mean %", "Win Rate"], cmap="RdYlGn"),
+            }).map(_color_val, subset=["Mean %", "Median %", "Best %", "Worst %"]),
             use_container_width=True, hide_index=True,
         )
 
