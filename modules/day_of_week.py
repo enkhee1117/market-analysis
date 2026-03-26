@@ -54,6 +54,8 @@ def compute_dow_returns(df: pd.DataFrame) -> pd.DataFrame:
 
 def filter_by_timeframe(df: pd.DataFrame, label: str) -> pd.DataFrame:
     """Slice dataframe to the given timeframe label."""
+    if df.empty:
+        return df
     days = TIMEFRAMES.get(label, 365)
     cutoff = df.index.max() - timedelta(days=days)
     return df[df.index >= cutoff]
