@@ -4,9 +4,13 @@ Unit tests for modules/gamma_exposure.py
 Covers:
 - Black-Scholes gamma formula accuracy against known analytical result
 - Edge/invalid input handling (T=0, sigma=0, S=0, K=0)
-- compute_gex output columns and types
-- gex_flip_point is within strike range (or None)
-- total_gex_metrics returns expected keys
+- GEX sign convention: calls positive (stabilizing), puts negative (destabilizing)
+- GEX formula: Gamma * OI * 100 * Spot^2 * 0.01
+- Scaling to billions (divide by 1e9)
+- Black-Scholes fallback when API gamma is missing/zero
+- gex_flip_point linear interpolation accuracy
+- total_gex_metrics aggregation correctness
+- Multi-expiration GEX aggregation
 - Plot functions return go.Figure
 """
 
@@ -18,6 +22,7 @@ from scipy.stats import norm
 
 from modules.gamma_exposure import (
     _bs_gamma,
+    _add_computed_gamma,
     compute_gex,
     gex_flip_point,
     total_gex_metrics,
@@ -59,23 +64,227 @@ def test_bs_gamma_is_nonnegative():
             assert _bs_gamma(S, K, 0.25, 0.05, 0.20) >= 0.0
 
 
-# ── compute_gex ───────────────────────────────────────────────────────────────
+def test_bs_gamma_peaks_near_atm():
+    """Gamma should peak at or near the at-the-money strike."""
+    spot = 400.0
+    strikes = np.arange(350, 451, 5)
+    gammas = [_bs_gamma(spot, k, 0.25, 0.05, 0.20) for k in strikes]
+    peak_strike = strikes[np.argmax(gammas)]
+    assert abs(peak_strike - spot) <= 10  # peak within $10 of ATM
+
+
+def test_bs_gamma_decreases_with_time():
+    """ATM gamma should decrease as time to expiry increases (more time = flatter curve)."""
+    short_term = _bs_gamma(400, 400, 0.05, 0.05, 0.20)  # ~2.5 weeks
+    long_term = _bs_gamma(400, 400, 1.0, 0.05, 0.20)     # 1 year
+    assert short_term > long_term
+
+
+# ── GEX Sign Convention ──────────────────────────────────────────────────────
+
+def test_call_gex_is_positive():
+    """Dealers short calls → call GEX should always be positive (stabilizing)."""
+    calls = pd.DataFrame({
+        "strike": [400.0],
+        "gamma": [0.01],
+        "openInterest": [1000.0],
+        "expiration": ["2025-06-20"],
+    })
+    puts = pd.DataFrame(columns=["strike", "gamma", "openInterest", "expiration"])
+    result = compute_gex(calls, puts, 400.0)
+    assert (result["call_gex"] > 0).all(), "Call GEX must be positive"
+
+
+def test_put_gex_is_negative():
+    """Dealers long puts → put GEX should always be negative (destabilizing)."""
+    calls = pd.DataFrame(columns=["strike", "gamma", "openInterest", "expiration"])
+    puts = pd.DataFrame({
+        "strike": [400.0],
+        "gamma": [0.01],
+        "openInterest": [1000.0],
+        "expiration": ["2025-06-20"],
+    })
+    result = compute_gex(calls, puts, 400.0)
+    assert (result["put_gex"] < 0).all(), "Put GEX must be negative"
+
+
+# ── GEX Formula Accuracy ─────────────────────────────────────────────────────
+
+def test_gex_formula_single_call():
+    """Verify exact GEX calculation: Gamma * OI * 100 * Spot^2 * 0.01"""
+    gamma, oi, spot = 0.02, 5000.0, 500.0
+    expected_call_gex = gamma * oi * 100 * (spot ** 2) * 0.01
+
+    calls = pd.DataFrame({
+        "strike": [500.0],
+        "gamma": [gamma],
+        "openInterest": [oi],
+        "expiration": ["2025-06-20"],
+    })
+    puts = pd.DataFrame(columns=["strike", "gamma", "openInterest", "expiration"])
+    result = compute_gex(calls, puts, spot)
+
+    assert len(result) == 1
+    np.testing.assert_allclose(result["call_gex"].iloc[0], expected_call_gex, rtol=1e-9)
+
+
+def test_gex_formula_single_put():
+    """Verify exact put GEX: -Gamma * OI * 100 * Spot^2 * 0.01"""
+    gamma, oi, spot = 0.015, 3000.0, 500.0
+    expected_put_gex = -gamma * oi * 100 * (spot ** 2) * 0.01
+
+    calls = pd.DataFrame(columns=["strike", "gamma", "openInterest", "expiration"])
+    puts = pd.DataFrame({
+        "strike": [500.0],
+        "gamma": [gamma],
+        "openInterest": [oi],
+        "expiration": ["2025-06-20"],
+    })
+    result = compute_gex(calls, puts, spot)
+
+    assert len(result) == 1
+    np.testing.assert_allclose(result["put_gex"].iloc[0], expected_put_gex, rtol=1e-9)
+
+
+def test_net_gex_at_same_strike():
+    """When calls and puts share a strike, net GEX = call_gex + put_gex."""
+    spot = 400.0
+    calls = pd.DataFrame({
+        "strike": [400.0], "gamma": [0.02], "openInterest": [2000.0],
+        "expiration": ["2025-06-20"],
+    })
+    puts = pd.DataFrame({
+        "strike": [400.0], "gamma": [0.03], "openInterest": [3000.0],
+        "expiration": ["2025-06-20"],
+    })
+    result = compute_gex(calls, puts, spot)
+
+    call_gex = 0.02 * 2000 * 100 * (400 ** 2) * 0.01
+    put_gex = -0.03 * 3000 * 100 * (400 ** 2) * 0.01
+    expected_net = call_gex + put_gex
+
+    assert len(result) == 1  # same strike, aggregated
+    np.testing.assert_allclose(result["net_gex"].iloc[0], expected_net, rtol=1e-9)
+
+
+# ── Billions Scaling ─────────────────────────────────────────────────────────
+
+def test_billions_scaling():
+    """_b columns must equal raw columns divided by 1e9."""
+    calls = pd.DataFrame({
+        "strike": [400.0], "gamma": [0.02], "openInterest": [5000.0],
+        "expiration": ["2025-06-20"],
+    })
+    puts = pd.DataFrame({
+        "strike": [400.0], "gamma": [0.015], "openInterest": [3000.0],
+        "expiration": ["2025-06-20"],
+    })
+    result = compute_gex(calls, puts, 400.0)
+
+    np.testing.assert_allclose(result["call_gex_b"].values, result["call_gex"].values / 1e9, rtol=1e-12)
+    np.testing.assert_allclose(result["put_gex_b"].values, result["put_gex"].values / 1e9, rtol=1e-12)
+    np.testing.assert_allclose(result["net_gex_b"].values, result["net_gex"].values / 1e9, rtol=1e-12)
+
+
+# ── Black-Scholes Fallback ───────────────────────────────────────────────────
+
+def test_bs_fallback_when_gamma_all_zero():
+    """If API returns gamma=0, compute_gex should recompute via Black-Scholes."""
+    spot = 400.0
+    calls = pd.DataFrame({
+        "strike": [400.0],
+        "gamma": [0.0],  # zero = trigger B-S fallback
+        "openInterest": [1000.0],
+        "impliedVolatility": [0.20],
+        "expiration": ["2027-06-20"],  # must be future date for T > 0
+    })
+    puts = pd.DataFrame(columns=["strike", "gamma", "openInterest", "impliedVolatility", "expiration"])
+    result = compute_gex(calls, puts, spot)
+
+    # Should have computed a non-zero GEX via B-S
+    assert not result.empty
+    assert result["call_gex"].iloc[0] > 0
+
+
+def test_bs_fallback_when_gamma_column_missing():
+    """If gamma column is absent entirely, compute_gex should use B-S."""
+    spot = 400.0
+    calls = pd.DataFrame({
+        "strike": [400.0],
+        "openInterest": [1000.0],
+        "impliedVolatility": [0.20],
+        "expiration": ["2027-06-20"],  # must be future date for T > 0
+    })
+    puts = pd.DataFrame(columns=["strike", "openInterest", "impliedVolatility", "expiration"])
+    result = compute_gex(calls, puts, spot)
+
+    assert not result.empty
+    assert result["call_gex"].iloc[0] > 0
+
+
+def test_add_computed_gamma_uses_expiration_for_tte():
+    """_add_computed_gamma should parse expiration to calculate time-to-expiry."""
+    spot = 400.0
+    df = pd.DataFrame({
+        "strike": [400.0],
+        "impliedVolatility": [0.20],
+        "expiration": ["2030-01-01"],  # far future = long T
+        "openInterest": [1000.0],
+    })
+    result = _add_computed_gamma(df, spot)
+    assert "gamma" in result.columns
+    assert result["gamma"].iloc[0] > 0
+
+
+# ── Edge Cases ───────────────────────────────────────────────────────────────
+
+def test_compute_gex_empty_with_zero_spot():
+    """Should return empty DataFrame when spot is 0 or None."""
+    calls = pd.DataFrame({"strike": [400.0], "gamma": [0.01], "openInterest": [100.0]})
+    assert compute_gex(calls, calls, 0).empty
+    assert compute_gex(calls, calls, None).empty
+
+
+def test_compute_gex_empty_when_no_oi():
+    """Contracts with zero OI should be filtered out."""
+    calls = pd.DataFrame({
+        "strike": [400.0], "gamma": [0.01], "openInterest": [0.0],
+        "expiration": ["2025-06-20"],
+    })
+    puts = pd.DataFrame(columns=["strike", "gamma", "openInterest", "expiration"])
+    result = compute_gex(calls, puts, 400.0)
+    assert result.empty
+
+
+def test_compute_gex_empty_inputs():
+    """Empty DataFrames should return empty result."""
+    result = compute_gex(pd.DataFrame(), pd.DataFrame(), 400.0)
+    assert result.empty
+
+
+def test_compute_gex_none_inputs():
+    """None inputs should return empty result."""
+    result = compute_gex(None, None, 400.0)
+    assert result.empty
+
+
+# ── compute_gex (original tests) ────────────────────────────────────────────
 
 def test_compute_gex_required_columns(options_dfs):
     calls, puts, spot = options_dfs
     result = compute_gex(calls, puts, spot)
-    required = {"strike", "net_gex", "call_gex", "put_gex"}
+    required = {"strike", "net_gex", "call_gex", "put_gex",
+                "call_gex_b", "put_gex_b", "net_gex_b"}
     assert required.issubset(result.columns), f"Missing: {required - set(result.columns)}"
 
 
 def test_compute_gex_one_row_per_strike(options_dfs):
     calls, puts, spot = options_dfs
     result = compute_gex(calls, puts, spot)
-    # Every strike should appear at most once
     assert result["strike"].nunique() == len(result)
 
 
-def test_compute_gex_net_equals_call_minus_put(options_dfs):
+def test_compute_gex_net_equals_call_plus_put(options_dfs):
     """net_gex = call_gex + put_gex (signs already applied in formula)."""
     calls, puts, spot = options_dfs
     result = compute_gex(calls, puts, spot)
@@ -84,6 +293,13 @@ def test_compute_gex_net_equals_call_minus_put(options_dfs):
         (result["call_gex"] + result["put_gex"]).values,
         rtol=1e-9,
     )
+
+
+def test_compute_gex_sorted_by_strike(options_dfs):
+    """Output should be sorted by strike price ascending."""
+    calls, puts, spot = options_dfs
+    result = compute_gex(calls, puts, spot)
+    assert (result["strike"].diff().dropna() >= 0).all()
 
 
 def test_compute_gex_returns_dataframe(options_dfs):
@@ -116,14 +332,121 @@ def test_gex_flip_point_none_when_all_same_sign():
     assert gex_flip_point(gex_df) is None
 
 
+def test_gex_flip_point_interpolation_accuracy():
+    """Verify linear interpolation: flip between strikes 400 and 410 where GEX crosses zero."""
+    gex_df = pd.DataFrame({
+        "strike": [390.0, 400.0, 410.0, 420.0],
+        "net_gex": [100.0, 50.0, -50.0, -100.0],
+    })
+    flip = gex_flip_point(gex_df)
+    # Linear interpolation: 400 + 50 * (410-400) / (50+50) = 405.0
+    assert flip is not None
+    np.testing.assert_allclose(flip, 405.0, atol=0.01)
+
+
+def test_gex_flip_point_finds_first_crossing():
+    """If multiple crossings exist, flip point should be the first one."""
+    gex_df = pd.DataFrame({
+        "strike": [390.0, 400.0, 410.0, 420.0, 430.0],
+        "net_gex": [10.0, -5.0, 8.0, -3.0, 1.0],
+    })
+    flip = gex_flip_point(gex_df)
+    # First crossing between 390 (positive) and 400 (negative)
+    assert flip is not None
+    assert 390.0 <= flip <= 400.0
+
+
+def test_gex_flip_point_empty_df():
+    assert gex_flip_point(pd.DataFrame()) is None
+
+
 # ── total_gex_metrics ─────────────────────────────────────────────────────────
 
 def test_total_gex_metrics_keys(options_dfs):
     calls, puts, spot = options_dfs
     gex_df = compute_gex(calls, puts, spot)
     metrics = total_gex_metrics(gex_df)
-    assert isinstance(metrics, dict)
-    assert len(metrics) > 0
+    expected_keys = {"total_net_gex_b", "total_call_gex_b", "total_put_gex_b",
+                     "peak_call_strike", "peak_put_strike"}
+    assert expected_keys == set(metrics.keys())
+
+
+def test_total_gex_metrics_net_equals_sum(options_dfs):
+    """total_net should equal total_call + total_put."""
+    calls, puts, spot = options_dfs
+    gex_df = compute_gex(calls, puts, spot)
+    m = total_gex_metrics(gex_df)
+    np.testing.assert_allclose(
+        m["total_net_gex_b"],
+        m["total_call_gex_b"] + m["total_put_gex_b"],
+        atol=0.001,
+    )
+
+
+def test_total_gex_metrics_empty():
+    assert total_gex_metrics(pd.DataFrame()) == {}
+
+
+def test_total_gex_metrics_call_positive_put_negative(options_dfs):
+    """Total call GEX should be positive, total put GEX should be negative."""
+    calls, puts, spot = options_dfs
+    gex_df = compute_gex(calls, puts, spot)
+    m = total_gex_metrics(gex_df)
+    assert m["total_call_gex_b"] > 0, "Total call GEX should be positive"
+    assert m["total_put_gex_b"] < 0, "Total put GEX should be negative"
+
+
+# ── Massive.com API data format ──────────────────────────────────────────────
+
+def test_compute_gex_with_massive_format():
+    """compute_gex should work with Massive.com API column names (camelCase openInterest)."""
+    spot = 550.0
+    calls = pd.DataFrame({
+        "strike": [540.0, 550.0, 560.0],
+        "gamma": [0.008, 0.015, 0.007],
+        "openInterest": [2000, 5000, 3000],
+        "impliedVolatility": [0.22, 0.20, 0.23],
+        "expiration": ["2025-07-18"] * 3,
+    })
+    puts = pd.DataFrame({
+        "strike": [540.0, 550.0, 560.0],
+        "gamma": [0.009, 0.014, 0.006],
+        "openInterest": [1500, 4000, 2500],
+        "impliedVolatility": [0.25, 0.21, 0.24],
+        "expiration": ["2025-07-18"] * 3,
+    })
+    result = compute_gex(calls, puts, spot)
+    assert len(result) == 3
+    assert (result["call_gex"] > 0).all()
+    assert (result["put_gex"] < 0).all()
+
+
+# ── Multi-expiration aggregation ─────────────────────────────────────────────
+
+def test_multi_expiration_aggregation():
+    """GEX by expiration should compute independent GEX for each date."""
+    spot = 400.0
+    calls = pd.DataFrame({
+        "strike": [400.0, 400.0],
+        "gamma": [0.02, 0.01],
+        "openInterest": [1000.0, 2000.0],
+        "expiration": ["2025-06-20", "2025-07-18"],
+    })
+    puts = pd.DataFrame({
+        "strike": [400.0, 400.0],
+        "gamma": [0.015, 0.012],
+        "openInterest": [800.0, 1500.0],
+        "expiration": ["2025-06-20", "2025-07-18"],
+    })
+
+    # Verify each expiration computes independently
+    for exp in ["2025-06-20", "2025-07-18"]:
+        c = calls[calls["expiration"] == exp]
+        p = puts[puts["expiration"] == exp]
+        g = compute_gex(c, p, spot)
+        assert not g.empty
+        assert (g["call_gex"] > 0).all()
+        assert (g["put_gex"] < 0).all()
 
 
 # ── plot functions ────────────────────────────────────────────────────────────
@@ -132,6 +455,12 @@ def test_plot_gex_profile_returns_figure(options_dfs):
     calls, puts, spot = options_dfs
     gex_df = compute_gex(calls, puts, spot)
     fig = plot_gex_profile(gex_df, spot, "SPY")
+    assert isinstance(fig, go.Figure)
+
+
+def test_plot_gex_profile_empty_data():
+    """Should return a Figure even with empty data (with error title)."""
+    fig = plot_gex_profile(pd.DataFrame(), 400.0, "SPY")
     assert isinstance(fig, go.Figure)
 
 
