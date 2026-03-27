@@ -126,6 +126,27 @@ def _bytes_to_df(b64_str: str) -> pd.DataFrame:
     return pd.read_parquet(io.BytesIO(raw))
 
 
+def _decode_bytea(encoded) -> bytes:
+    """
+    Decode a bytea value returned by Supabase.
+
+    Supabase returns bytea columns as hex-escaped strings (\\x...).
+    Since we store base64 text as bytea, we get hex-of-base64-ascii.
+    Decode chain: hex → ASCII string → base64 decode → raw bytes.
+    """
+    if isinstance(encoded, bytes):
+        return encoded
+    if isinstance(encoded, str) and encoded.startswith("\\x"):
+        # Hex-encoded: decode hex → bytes (which are ASCII of our base64)
+        ascii_bytes = bytes.fromhex(encoded[2:])
+        b64_str = ascii_bytes.decode("ascii")
+        return base64.b64decode(b64_str)
+    if isinstance(encoded, str):
+        # Plain base64 string
+        return base64.b64decode(encoded)
+    return b""
+
+
 def read_cache_remote(table: str, cache_key: str) -> pd.DataFrame | None:
     """
     Read a cached DataFrame from Supabase.
@@ -148,16 +169,8 @@ def read_cache_remote(table: str, cache_key: str) -> pd.DataFrame | None:
             .execute()
         )
         if resp.data and resp.data[0].get("data_parquet"):
-            encoded = resp.data[0]["data_parquet"]
-            # Supabase returns bytea as hex-escaped string: \x...
-            # or as raw base64 depending on the client version.
-            if isinstance(encoded, str) and encoded.startswith("\\x"):
-                raw = bytes.fromhex(encoded[2:])
-                return pd.read_parquet(io.BytesIO(raw))
-            elif isinstance(encoded, str):
-                return _bytes_to_df(encoded)
-            elif isinstance(encoded, bytes):
-                return pd.read_parquet(io.BytesIO(encoded))
+            raw = _decode_bytea(resp.data[0]["data_parquet"])
+            return pd.read_parquet(io.BytesIO(raw))
         return None
     except Exception as e:
         logger.warning("Supabase read_cache_remote(%s, %s) failed: %s", table, cache_key, e)
@@ -194,7 +207,7 @@ def write_cache_remote(
 # ── Spot Price Helpers ───────────────────────────────────────────────────────
 
 def read_spot_remote(cache_key: str) -> float | None:
-    """Read a cached spot price from options_cache (stored as tiny parquet)."""
+    """Read a cached spot price from options_cache (stored as JSON blob)."""
     client = _get_client()
     if client is None:
         return None
@@ -207,17 +220,9 @@ def read_spot_remote(cache_key: str) -> float | None:
             .execute()
         )
         if resp.data and resp.data[0].get("data_parquet"):
-            encoded = resp.data[0]["data_parquet"]
             import json
-            if isinstance(encoded, str) and encoded.startswith("\\x"):
-                raw = bytes.fromhex(encoded[2:]).decode("utf-8")
-            elif isinstance(encoded, str):
-                raw = base64.b64decode(encoded).decode("utf-8")
-            elif isinstance(encoded, bytes):
-                raw = encoded.decode("utf-8")
-            else:
-                return None
-            return json.loads(raw).get("spot")
+            raw = _decode_bytea(resp.data[0]["data_parquet"])
+            return json.loads(raw.decode("utf-8")).get("spot")
         return None
     except Exception as e:
         logger.warning("Supabase read_spot_remote(%s) failed: %s", cache_key, e)
