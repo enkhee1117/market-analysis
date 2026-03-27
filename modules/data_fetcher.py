@@ -124,12 +124,22 @@ def _get_massive_api_key() -> str | None:
         return os.environ.get("MASSIVE_API_KEY")
 
 
+_last_massive_error = ""
+
+
+def get_last_massive_error() -> str:
+    """Return the last Massive.com API error message (for UI display)."""
+    return _last_massive_error
+
+
 def _massive_get(endpoint: str, params: dict | None = None) -> dict | None:
     """Make an authenticated GET request to Massive.com API."""
+    global _last_massive_error
     import requests
 
     api_key = _get_massive_api_key()
     if not api_key:
+        _last_massive_error = "No MASSIVE_API_KEY configured"
         return None
 
     url = f"{MASSIVE_BASE_URL}{endpoint}"
@@ -138,9 +148,19 @@ def _massive_get(endpoint: str, params: dict | None = None) -> dict | None:
 
     try:
         resp = requests.get(url, params=params, timeout=30)
-        resp.raise_for_status()
-        return resp.json()
-    except Exception:
+        if resp.status_code != 200:
+            _last_massive_error = f"HTTP {resp.status_code}: {resp.text[:200]}"
+            return None
+        data = resp.json()
+        if data.get("status") != "OK":
+            _last_massive_error = f"API error: {data.get('error', data.get('status', 'unknown'))}"
+            return None
+        return data
+    except requests.exceptions.Timeout:
+        _last_massive_error = "Request timed out"
+        return None
+    except Exception as e:
+        _last_massive_error = str(e)[:200]
         return None
 
 
@@ -255,20 +275,21 @@ def fetch_options_chain_massive(ticker: str):
 
 # ── Options chain (with Massive fallback to Yahoo) ───────────────────────────
 
-@st.cache_data(ttl=86400)
 def fetch_options_chain(ticker: str):
     """
     Fetch options chain. Uses Massive.com API if an API key is configured,
-    otherwise falls back to Yahoo Finance. Cached to disk daily.
+    otherwise falls back to Yahoo Finance.
+    Returns (calls_df, puts_df, spot, source_name).
     """
     # Try Massive.com first if API key is available
     if _get_massive_api_key():
         result = fetch_options_chain_massive(ticker)
         if result and result[0] is not None and not result[0].empty:
-            return result
+            return result[0], result[1], result[2], "Massive.com"
 
     # Fallback: Yahoo Finance
-    return _fetch_options_chain_yfinance(ticker)
+    result = _fetch_options_chain_yfinance(ticker)
+    return result[0], result[1], result[2], "Yahoo Finance"
 
 
 def _fetch_options_chain_yfinance(ticker: str):

@@ -258,17 +258,17 @@ with tab2:
 
     strike_range = st.slider("Strike Range Around Spot (±%)", 5, 20, 10, step=1)
 
-    # Determine data source
-    from modules.data_fetcher import _get_massive_api_key
-    data_source = "Massive.com" if _get_massive_api_key() else "Yahoo Finance"
-
-    with st.spinner(f"Fetching {gex_ticker} options chain via {data_source}..."):
-        calls_df, puts_df, spot = fetch_options_chain(gex_ticker)
+    with st.spinner(f"Fetching {gex_ticker} options chain..."):
+        calls_df, puts_df, spot, data_source = fetch_options_chain(gex_ticker)
 
     if calls_df is None or calls_df.empty or spot is None:
-        st.error(f"Could not fetch options data for {gex_ticker} via {data_source}.")
-        if gex_ticker == "SPX" and data_source == "Yahoo Finance":
-            st.info("Try switching to SPY in the sidebar — SPX (^GSPC) options data availability varies.")
+        st.error(f"Could not fetch options data for {gex_ticker}.")
+        from modules.data_fetcher import get_last_massive_error
+        massive_err = get_last_massive_error()
+        if massive_err:
+            st.warning(f"Massive.com API: {massive_err}")
+        if gex_ticker == "SPX":
+            st.info("Try switching to SPY in the sidebar — SPX options data availability varies.")
         st.stop()
 
     st.caption(f"Data source: {data_source} · Cached daily")
