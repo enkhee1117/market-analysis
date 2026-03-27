@@ -139,11 +139,12 @@ def _get_freshness():
 _freshness = _get_freshness()
 _staleness = data_staleness_info(_freshness)
 
-# Status indicator
+# Status indicator with timestamp
+_ts_label = _staleness.get("options_age_str", "N/A")
 if _staleness["status"] == "fresh":
-    st.sidebar.success(f"🟢 {_staleness['message']}")
+    st.sidebar.success(f"🟢 {_staleness['message']}  ({_ts_label})")
 elif _staleness["status"] == "stale":
-    st.sidebar.warning(f"🟡 {_staleness['message']}")
+    st.sidebar.warning(f"🟡 {_staleness['message']}  (last pull: {_ts_label})")
 else:
     st.sidebar.info(f"⚪ {_staleness['message']}")
 
@@ -348,7 +349,7 @@ with tab2:
 
     with st.spinner("Computing GEX..."):
         gex_df  = compute_gex(calls_df, puts_df, spot)
-        flip    = gex_flip_point(gex_df)
+        flip    = gex_flip_point(gex_df, spot)
         metrics = total_gex_metrics(gex_df)
         gamma_idx = compute_gamma_index(gex_df, spot)
         # Persist today's gamma index for the timeline chart

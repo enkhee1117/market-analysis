@@ -119,9 +119,15 @@ def compute_gex(calls_df: pd.DataFrame, puts_df: pd.DataFrame, spot: float) -> p
     return gex.sort_values("strike").reset_index(drop=True)
 
 
-def gex_flip_point(gex_df: pd.DataFrame) -> float | None:
+def gex_flip_point(gex_df: pd.DataFrame, spot: float | None = None) -> float | None:
     """
     Find the gamma flip point: the strike where net GEX crosses zero.
+
+    When *spot* is provided the function returns the crossing **nearest
+    to spot** (which is the one traders actually care about).  Without
+    spot it falls back to the crossing with the largest absolute GEX
+    magnitude on either side — i.e. the most "meaningful" one.
+
     Returns the interpolated strike price, or None if no crossing exists.
     """
     if gex_df.empty or "net_gex" not in gex_df.columns:
@@ -131,14 +137,28 @@ def gex_flip_point(gex_df: pd.DataFrame) -> float | None:
     net = df["net_gex"].values
     strikes = df["strike"].values
 
+    # Collect ALL zero crossings
+    crossings = []
     for i in range(len(net) - 1):
         if net[i] * net[i + 1] < 0:
-            # Linear interpolation
             s1, s2 = strikes[i], strikes[i + 1]
             g1, g2 = net[i], net[i + 1]
             flip = s1 - g1 * (s2 - s1) / (g2 - g1)
-            return round(flip, 2)
-    return None
+            # Magnitude = sum of absolute GEX on both sides of crossing
+            magnitude = abs(g1) + abs(g2)
+            crossings.append((round(flip, 2), magnitude))
+
+    if not crossings:
+        return None
+
+    if spot is not None and spot > 0:
+        # Return the crossing nearest to spot
+        crossings.sort(key=lambda c: abs(c[0] - spot))
+    else:
+        # Return the crossing with the largest surrounding GEX magnitude
+        crossings.sort(key=lambda c: -c[1])
+
+    return crossings[0][0]
 
 
 def total_gex_metrics(gex_df: pd.DataFrame) -> dict:
@@ -210,7 +230,7 @@ def compute_gamma_index(gex_df: pd.DataFrame, spot: float) -> dict:
     put_wall  = float(df.loc[df["put_gex_b"].idxmin(),  "strike"]) if df["put_gex_b"].abs().sum() > 0 else None
 
     # ── Gamma Flip ──
-    flip = gex_flip_point(df)
+    flip = gex_flip_point(df, spot)
 
     # ── Gamma Tilt (above-spot fraction of net GEX) ──
     above = df[df["strike"] > spot]
@@ -438,7 +458,7 @@ def plot_gex_profile(gex_df: pd.DataFrame, spot: float, ticker: str,
     if sub.empty:
         sub = gex_df.copy()
 
-    flip = gex_flip_point(gex_df)
+    flip = gex_flip_point(gex_df, spot)
 
     fig = go.Figure()
 
