@@ -39,7 +39,7 @@ jobs:
 
       - name: Verify runtime.txt format
         run: |
-          grep -qE '^python-3\.[0-9]+\.[0-9]+$' runtime.txt || (echo "ERROR: runtime.txt must be format python-X.Y.Z" && exit 1)
+          grep -qE '^python-3\.[0-9]+(\.[0-9]+)?$' runtime.txt || (echo "ERROR: runtime.txt must be format python-X.Y or python-X.Y.Z" && exit 1)
           echo "runtime.txt format OK: $(cat runtime.txt)"
 
       - name: Run test suite

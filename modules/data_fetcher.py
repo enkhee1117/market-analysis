@@ -47,15 +47,28 @@ def fetch_multi_tickers(tickers: list, period: str = "1y", interval: str = "1d")
 @st.cache_data(ttl=600)
 def fetch_options_chain(ticker: str):
     """Fetch all options chains for nearest expirations (up to 6)."""
+    import time
+
     tk = yf.Ticker(ticker)
-    expirations = tk.options
+    try:
+        expirations = tk.options
+    except Exception:
+        return None, None, None
+
     if not expirations:
         return None, None, None
 
-    spot = tk.fast_info.get("lastPrice") or tk.fast_info.get("regularMarketPrice")
+    spot = None
+    try:
+        spot = tk.fast_info.get("lastPrice") or tk.fast_info.get("regularMarketPrice")
+    except Exception:
+        pass
     if spot is None or spot == 0:
-        hist = tk.history(period="1d")
-        spot = float(hist["Close"].iloc[-1]) if not hist.empty else None
+        try:
+            hist = tk.history(period="1d")
+            spot = float(hist["Close"].iloc[-1]) if not hist.empty else None
+        except Exception:
+            pass
 
     all_calls = []
     all_puts = []
@@ -69,6 +82,7 @@ def fetch_options_chain(ticker: str):
             puts["expiration"] = exp
             all_calls.append(calls)
             all_puts.append(puts)
+            time.sleep(0.2)  # Rate-limit protection
         except Exception:
             continue
 
