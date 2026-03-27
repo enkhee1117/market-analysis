@@ -115,6 +115,14 @@ def fetch_multi_tickers(tickers: list, period: str = "1y", interval: str = "1d")
 
 MASSIVE_BASE_URL = "https://api.massive.com/v3"
 
+# Rate-limit / circuit-breaker state
+_massive_request_count = 0          # requests made this session
+_massive_cooldown_until = 0.0       # monotonic time when cooldown expires
+_MASSIVE_PAGE_DELAY = 0.3           # seconds between paginated requests
+_MASSIVE_MAX_PAGES = 40             # hard cap: 40 pages × 250 = 10,000 contracts
+_MASSIVE_MAX_RETRIES = 2            # retries on 429 / 5xx
+_MASSIVE_COOLDOWN_SECS = 300        # 5-min cooldown after repeated 429s
+
 
 def _get_massive_api_key() -> str | None:
     """Retrieve Massive API key from Streamlit secrets or environment."""
@@ -133,9 +141,23 @@ def get_last_massive_error() -> str:
 
 
 def _massive_get(endpoint: str, params: dict | None = None) -> dict | None:
-    """Make an authenticated GET request to Massive.com API."""
-    global _last_massive_error
+    """
+    Make an authenticated GET request to Massive.com API.
+
+    Handles:
+    - 429 / 5xx with exponential backoff (up to _MASSIVE_MAX_RETRIES)
+    - Rate-limit headers (X-RateLimit-Remaining, Retry-After)
+    - Circuit-breaker cooldown after repeated failures
+    """
+    global _last_massive_error, _massive_request_count, _massive_cooldown_until
     import requests
+
+    # ── Circuit breaker: skip if in cooldown ──
+    now = time.monotonic()
+    if now < _massive_cooldown_until:
+        remaining = int(_massive_cooldown_until - now)
+        _last_massive_error = f"Rate-limit cooldown active ({remaining}s remaining)"
+        return None
 
     api_key = _get_massive_api_key()
     if not api_key:
@@ -146,22 +168,70 @@ def _massive_get(endpoint: str, params: dict | None = None) -> dict | None:
     params = params or {}
     params["apiKey"] = api_key
 
-    try:
-        resp = requests.get(url, params=params, timeout=30)
-        if resp.status_code != 200:
-            _last_massive_error = f"HTTP {resp.status_code}: {resp.text[:200]}"
+    for attempt in range(_MASSIVE_MAX_RETRIES + 1):
+        try:
+            resp = requests.get(url, params=params, timeout=30)
+            _massive_request_count += 1
+
+            # ── Respect rate-limit headers ──
+            rl_remaining = resp.headers.get("X-RateLimit-Remaining")
+            if rl_remaining is not None:
+                try:
+                    if int(rl_remaining) <= 2:
+                        # Near the limit — slow down proactively
+                        time.sleep(2.0)
+                except (ValueError, TypeError):
+                    pass
+
+            # ── Handle 429 Too Many Requests ──
+            if resp.status_code == 429:
+                retry_after = resp.headers.get("Retry-After")
+                wait = float(retry_after) if retry_after else (2 ** attempt * 2)
+                wait = min(wait, 60)  # cap at 60s
+                if attempt < _MASSIVE_MAX_RETRIES:
+                    time.sleep(wait)
+                    continue
+                else:
+                    # Activate circuit-breaker cooldown
+                    _massive_cooldown_until = time.monotonic() + _MASSIVE_COOLDOWN_SECS
+                    _last_massive_error = (
+                        f"Rate limited (429). Cooling down for "
+                        f"{_MASSIVE_COOLDOWN_SECS}s to protect API quota."
+                    )
+                    return None
+
+            # ── Handle 5xx server errors with retry ──
+            if resp.status_code >= 500:
+                if attempt < _MASSIVE_MAX_RETRIES:
+                    time.sleep(2 ** attempt * 1)
+                    continue
+                _last_massive_error = f"HTTP {resp.status_code}: {resp.text[:200]}"
+                return None
+
+            # ── Other non-200 errors ──
+            if resp.status_code != 200:
+                _last_massive_error = f"HTTP {resp.status_code}: {resp.text[:200]}"
+                return None
+
+            data = resp.json()
+            if data.get("status") != "OK":
+                _last_massive_error = (
+                    f"API error: {data.get('error', data.get('status', 'unknown'))}"
+                )
+                return None
+            return data
+
+        except requests.exceptions.Timeout:
+            if attempt < _MASSIVE_MAX_RETRIES:
+                time.sleep(2 ** attempt * 1)
+                continue
+            _last_massive_error = "Request timed out after retries"
             return None
-        data = resp.json()
-        if data.get("status") != "OK":
-            _last_massive_error = f"API error: {data.get('error', data.get('status', 'unknown'))}"
+        except Exception as e:
+            _last_massive_error = str(e)[:200]
             return None
-        return data
-    except requests.exceptions.Timeout:
-        _last_massive_error = "Request timed out"
-        return None
-    except Exception as e:
-        _last_massive_error = str(e)[:200]
-        return None
+
+    return None  # should not reach here
 
 
 @st.cache_data(ttl=86400)
@@ -170,7 +240,12 @@ def fetch_options_chain_massive(ticker: str):
     Fetch full options chain from Massive.com API.
     Returns (calls_df, puts_df, spot) matching the format expected by compute_gex().
 
-    Paginates through all results (250 per page).
+    Rate-limit protections:
+    - File cache checked first (zero API calls on cache hit)
+    - 0.3 s delay between paginated requests
+    - Hard cap at 40 pages (10,000 contracts)
+    - Exponential backoff on 429 / 5xx
+    - 5-min circuit-breaker cooldown after repeated 429s
     """
     # Check file cache first
     calls_cache_key = f"{ticker}_massive_calls"
@@ -191,11 +266,18 @@ def fetch_options_chain_massive(ticker: str):
         return cached_calls, cached_puts, cached_spot
 
     # Fetch from Massive.com API with pagination
+    from urllib.parse import urlparse, parse_qs
+
     all_results = []
     endpoint = f"/snapshot/options/{ticker}"
     params = {"limit": 250, "order": "asc", "sort": "ticker"}
+    page = 0
 
-    while endpoint:
+    while endpoint and page < _MASSIVE_MAX_PAGES:
+        # Throttle between pages (skip delay on first request)
+        if page > 0:
+            time.sleep(_MASSIVE_PAGE_DELAY)
+
         data = _massive_get(endpoint, params)
         if data is None or data.get("status") != "OK":
             break
@@ -204,16 +286,14 @@ def fetch_options_chain_massive(ticker: str):
         if not results:
             break
         all_results.extend(results)
+        page += 1
 
         # Handle pagination
         next_url = data.get("next_url")
         if next_url:
-            # next_url is a full URL; extract path and params
-            from urllib.parse import urlparse, parse_qs
             parsed = urlparse(next_url)
             endpoint = parsed.path.replace("/v3", "", 1) if "/v3" in parsed.path else parsed.path
             params = {k: v[0] for k, v in parse_qs(parsed.query).items()}
-            # Remove apiKey from params (we add it in _massive_get)
             params.pop("apiKey", None)
         else:
             break

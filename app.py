@@ -120,10 +120,26 @@ gex_ticker  = st.sidebar.radio("GEX Ticker", ["SPY", "SPX"], index=0,
                                 help="SPX options = 10x multiplier vs SPY")
 
 st.sidebar.markdown("---")
-if st.sidebar.button("Force Refresh Data"):
-    clear_today_cache()
-    st.cache_data.clear()
-    st.rerun()
+# Rate-limit protection: track last refresh time in session state
+if "last_force_refresh" not in st.session_state:
+    st.session_state["last_force_refresh"] = 0.0
+
+import time as _time
+_now = _time.time()
+_cooldown_remaining = max(0, 300 - (_now - st.session_state["last_force_refresh"]))
+
+if _cooldown_remaining > 0:
+    st.sidebar.button(
+        f"Force Refresh (wait {int(_cooldown_remaining)}s)",
+        disabled=True,
+    )
+else:
+    if st.sidebar.button("Force Refresh Data"):
+        st.session_state["last_force_refresh"] = _now
+        clear_today_cache()
+        st.cache_data.clear()
+        st.rerun()
+
 st.sidebar.caption("Data via Yahoo Finance · Cached daily")
 st.sidebar.caption("GEX assumes MM short calls, long puts")
 
