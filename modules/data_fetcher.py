@@ -128,15 +128,26 @@ def _write_spot_cache(spot_key: str, spot: float) -> None:
 
 
 def clear_today_cache():
-    """Delete all of today's local cache files (used by Force Refresh button)."""
-    if not os.path.exists(CACHE_DIR):
-        return
+    """Delete all of today's cached data (local files + Supabase) for Force Refresh."""
     today = date.today().isoformat()
-    for f in glob.glob(os.path.join(CACHE_DIR, f"*_{today}.*")):
-        try:
-            os.remove(f)
-        except Exception:
-            pass
+
+    # Layer 1: local files
+    if os.path.exists(CACHE_DIR):
+        for f in glob.glob(os.path.join(CACHE_DIR, f"*_{today}.*")):
+            try:
+                os.remove(f)
+            except Exception:
+                pass
+
+    # Layer 2: Supabase — delete today's entries so fresh data is fetched
+    try:
+        from modules.supabase_cache import _get_client
+        client = _get_client()
+        if client:
+            client.table("options_cache").delete().eq("cache_date", today).execute()
+            client.table("price_cache").delete().eq("cache_date", today).execute()
+    except Exception:
+        pass
 
 
 # ── Data fetching functions ──────────────────────────────────────────────────

@@ -19,6 +19,11 @@ from modules.data_fetcher import (
     clear_today_cache,
     TIMEFRAME_MAP,
 )
+from modules.supabase_cache import (
+    get_data_freshness,
+    data_staleness_info,
+    is_market_open,
+)
 from modules.day_of_week import (
     compute_dow_returns,
     filter_by_timeframe,
@@ -120,27 +125,72 @@ gex_ticker  = st.sidebar.radio("GEX Ticker", ["SPY", "SPX"], index=0,
                                 help="SPX options = 10x multiplier vs SPY")
 
 st.sidebar.markdown("---")
+
+# ── Data Freshness Display ────────────────────────────────────────────────
+st.sidebar.subheader("Data Status")
+
+import time as _time
+
+# Get freshness info (cache this briefly to avoid hammering Supabase on every rerun)
+@st.cache_data(ttl=60)
+def _get_freshness():
+    return get_data_freshness()
+
+_freshness = _get_freshness()
+_staleness = data_staleness_info(_freshness)
+
+# Status indicator
+if _staleness["status"] == "fresh":
+    st.sidebar.success(f"🟢 {_staleness['message']}")
+elif _staleness["status"] == "stale":
+    st.sidebar.warning(f"🟡 {_staleness['message']}")
+else:
+    st.sidebar.info(f"⚪ {_staleness['message']}")
+
+# Timestamps
+st.sidebar.caption(f"Options data: {_staleness['options_age_str']}")
+st.sidebar.caption(f"Price data: {_staleness['price_age_str']}")
+
+if _freshness.get("supabase_connected"):
+    st.sidebar.caption("💾 Supabase: connected")
+else:
+    st.sidebar.caption("💾 Supabase: not connected (local cache only)")
+
+if is_market_open():
+    st.sidebar.caption("🔔 Market: OPEN")
+else:
+    st.sidebar.caption("🔕 Market: CLOSED")
+
+st.sidebar.markdown("---")
+
 # Rate-limit protection: track last refresh time in session state
 if "last_force_refresh" not in st.session_state:
     st.session_state["last_force_refresh"] = 0.0
 
-import time as _time
 _now = _time.time()
-_cooldown_remaining = max(0, 300 - (_now - st.session_state["last_force_refresh"]))
+# Shorter cooldown during market hours (2 min), longer off-hours (5 min)
+_cooldown_secs = 120 if is_market_open() else 300
+_cooldown_remaining = max(0, _cooldown_secs - (_now - st.session_state["last_force_refresh"]))
 
 if _cooldown_remaining > 0:
     st.sidebar.button(
-        f"Force Refresh (wait {int(_cooldown_remaining)}s)",
+        f"🔄 Refresh Data (wait {int(_cooldown_remaining)}s)",
         disabled=True,
     )
+elif _staleness.get("is_stale"):
+    # Highlight refresh button when data is stale
+    if st.sidebar.button("🔄 Refresh Data (Stale!)", type="primary"):
+        st.session_state["last_force_refresh"] = _now
+        clear_today_cache()
+        st.cache_data.clear()
+        st.rerun()
 else:
-    if st.sidebar.button("Force Refresh Data"):
+    if st.sidebar.button("🔄 Refresh Data"):
         st.session_state["last_force_refresh"] = _now
         clear_today_cache()
         st.cache_data.clear()
         st.rerun()
 
-st.sidebar.caption("Data via Yahoo Finance · Cached daily")
 st.sidebar.caption("GEX assumes MM short calls, long puts")
 
 
