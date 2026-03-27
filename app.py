@@ -34,6 +34,7 @@ from modules.gamma_exposure import (
     compute_gex,
     gex_flip_point,
     total_gex_metrics,
+    compute_gamma_index,
     plot_gex_profile,
     plot_gex_by_expiration,
 )
@@ -256,7 +257,11 @@ with tab2:
     - **Gamma Flip** = strike where net GEX crosses zero; acts as key support/resistance
     """)
 
-    strike_range = st.slider("Strike Range Around Spot (±%)", 5, 20, 10, step=1)
+    ctrl_cols = st.columns([2, 2, 4])
+    with ctrl_cols[0]:
+        strike_range = st.slider("Strike Range (±%)", 5, 20, 10, step=1)
+    with ctrl_cols[1]:
+        gex_view = st.radio("Chart View", ["Call / Put", "Net GEX"], horizontal=True)
 
     with st.spinner(f"Fetching {gex_ticker} options chain..."):
         calls_df, puts_df, spot, data_source = fetch_options_chain(gex_ticker)
@@ -277,12 +282,65 @@ with tab2:
         gex_df  = compute_gex(calls_df, puts_df, spot)
         flip    = gex_flip_point(gex_df)
         metrics = total_gex_metrics(gex_df)
+        gamma_idx = compute_gamma_index(gex_df, spot)
 
     if gex_df.empty:
         st.warning("GEX data empty — options gamma/OI fields may be missing in the data.")
         st.stop()
 
-    # Metrics row
+    # ── Gamma Index panel ────────────────────────────────────────────────────
+    st.subheader("Gamma Index")
+    gi_val = gamma_idx.get("gamma_index", 0)
+    gi_cond = gamma_idx.get("gamma_condition", "N/A")
+    gi_tilt = gamma_idx.get("gamma_tilt", 0.5)
+    gi_conc = gamma_idx.get("gamma_concentration", 0)
+    cw = gamma_idx.get("call_wall")
+    pw = gamma_idx.get("put_wall")
+
+    gi_cols = st.columns(6)
+    with gi_cols[0]:
+        colored_metric("Gamma Index", f"{gi_val:+.3f}B",
+                       sub=gi_cond)
+    with gi_cols[1]:
+        colored_metric("Call Wall", f"${cw:,.0f}" if cw else "N/A",
+                       sub="Resistance")
+    with gi_cols[2]:
+        colored_metric("Put Wall", f"${pw:,.0f}" if pw else "N/A",
+                       sub="Support", positive_is_good=False)
+    with gi_cols[3]:
+        flip_str = f"${flip:.2f}" if flip else "N/A"
+        colored_metric("Gamma Flip", flip_str, positive_is_good=False,
+                       sub="Zero-Gamma Level")
+    with gi_cols[4]:
+        tilt_label = "Bullish" if gi_tilt > 0.55 else ("Bearish" if gi_tilt < 0.45 else "Balanced")
+        colored_metric("Gamma Tilt", f"{gi_tilt:.1%}",
+                       sub=tilt_label)
+    with gi_cols[5]:
+        colored_metric("Concentration", f"{gi_conc:.0%}",
+                       sub="within ±2% of spot")
+
+    # Top strikes
+    top_strikes = gamma_idx.get("top_strikes", [])
+    if top_strikes:
+        with st.expander("Top 5 Strikes by Gamma"):
+            ts_df = pd.DataFrame(top_strikes).rename(
+                columns={"strike": "Strike", "net_gex_b": "Net GEX ($B)"}
+            )
+            def _ts_color(v):
+                try:
+                    f = float(v)
+                    return "color: #5FC97B" if f > 0 else ("color: #E85C5C" if f < 0 else "")
+                except (TypeError, ValueError):
+                    return ""
+            st.dataframe(
+                ts_df.style.format({"Strike": "${:,.0f}", "Net GEX ($B)": "{:+.4f}"})
+                .map(_ts_color, subset=["Net GEX ($B)"]),
+                use_container_width=True, hide_index=True,
+            )
+
+    st.markdown("---")
+
+    # ── GEX metrics row ──────────────────────────────────────────────────────
     st.subheader("GEX Summary")
     m_cols = st.columns(6)
     with m_cols[0]: colored_metric("Spot Price", f"${spot:.2f}")
@@ -309,7 +367,9 @@ with tab2:
     st.markdown("---")
 
     # GEX Profile
-    fig_gex = plot_gex_profile(gex_df, spot, gex_ticker, strike_range_pct=strike_range / 100)
+    fig_gex = plot_gex_profile(gex_df, spot, gex_ticker,
+                               strike_range_pct=strike_range / 100,
+                               view_mode=gex_view)
     st.plotly_chart(fig_gex, use_container_width=True)
 
     # GEX by expiration

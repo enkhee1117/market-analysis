@@ -157,20 +157,117 @@ def total_gex_metrics(gex_df: pd.DataFrame) -> dict:
     }
 
 
+# ── Gamma Index (inspired by SpotGamma) ─────────────────────────────────────
+
+def compute_gamma_index(gex_df: pd.DataFrame, spot: float) -> dict:
+    """
+    Compute a Gamma Index and derived key levels, inspired by SpotGamma's
+    GEX Index methodology.
+
+    Metrics returned
+    ----------------
+    gamma_index : float
+        Total Net GEX in $ billions — the estimated dealer hedging flow
+        triggered by a 1 % move in the underlying.  Positive → stabilising
+        (dealers sell rallies / buy dips), negative → destabilising.
+    gamma_condition : str
+        Human-readable label: "Positive (Stabilizing)" or "Negative (Destabilizing)".
+    call_wall : float
+        Strike with the largest absolute call GEX — acts as resistance.
+    put_wall : float
+        Strike with the largest absolute put GEX — acts as support.
+    gamma_flip : float | None
+        Strike where net GEX crosses zero.
+    gamma_tilt : float
+        (Σ net_gex above spot) / (Σ |net_gex| above + below).
+        > 0.5 → bullish tilt, < 0.5 → bearish tilt.
+    gamma_concentration : float
+        Fraction of total |GEX| within ± 2 % of spot — higher means
+        gamma is clustered near the money (stronger pin risk).
+    top_strikes : list[dict]
+        Top 5 strikes by absolute net GEX with their values.
+    """
+    if gex_df.empty or spot is None or spot == 0:
+        return {}
+
+    df = gex_df.copy()
+
+    # ── Core index value (total net GEX in $B) ──
+    gamma_index = float(df["net_gex_b"].sum())
+
+    # ── Condition label ──
+    if gamma_index > 0:
+        condition = "Positive (Stabilizing)"
+    elif gamma_index < 0:
+        condition = "Negative (Destabilizing)"
+    else:
+        condition = "Neutral"
+
+    # ── Key levels: Call Wall / Put Wall ──
+    call_wall = float(df.loc[df["call_gex_b"].idxmax(), "strike"]) if df["call_gex_b"].abs().sum() > 0 else None
+    put_wall  = float(df.loc[df["put_gex_b"].idxmin(),  "strike"]) if df["put_gex_b"].abs().sum() > 0 else None
+
+    # ── Gamma Flip ──
+    flip = gex_flip_point(df)
+
+    # ── Gamma Tilt (above-spot fraction of net GEX) ──
+    above = df[df["strike"] > spot]
+    below = df[df["strike"] <= spot]
+    total_abs = df["net_gex"].abs().sum()
+    if total_abs > 0:
+        above_net = above["net_gex"].sum()
+        tilt = (above_net / total_abs + 1) / 2  # map from [-1,1] → [0,1]
+        tilt = round(max(0.0, min(1.0, tilt)), 3)
+    else:
+        tilt = 0.5
+
+    # ── Gamma Concentration (within ±2% of spot) ──
+    lo = spot * 0.98
+    hi = spot * 1.02
+    near_spot = df[(df["strike"] >= lo) & (df["strike"] <= hi)]
+    if total_abs > 0:
+        concentration = round(float(near_spot["net_gex"].abs().sum() / total_abs), 3)
+    else:
+        concentration = 0.0
+
+    # ── Top 5 strikes by absolute net GEX ──
+    df["abs_net"] = df["net_gex_b"].abs()
+    top5 = df.nlargest(5, "abs_net")
+    top_strikes = [
+        {"strike": float(row["strike"]), "net_gex_b": round(float(row["net_gex_b"]), 4)}
+        for _, row in top5.iterrows()
+    ]
+
+    return {
+        "gamma_index":          round(gamma_index, 4),
+        "gamma_condition":      condition,
+        "call_wall":            call_wall,
+        "put_wall":             put_wall,
+        "gamma_flip":           flip,
+        "gamma_tilt":           round(tilt, 3),
+        "gamma_concentration":  concentration,
+        "top_strikes":          top_strikes,
+    }
+
+
 # ── Charts ────────────────────────────────────────────────────────────────────
 
 def plot_gex_profile(gex_df: pd.DataFrame, spot: float, ticker: str,
-                     strike_range_pct: float = 0.10) -> go.Figure:
+                     strike_range_pct: float = 0.10,
+                     view_mode: str = "Call / Put") -> go.Figure:
     """
-    Bar chart showing GEX per strike, color-coded by call (positive) vs put (negative).
-    Vertical lines for spot and gamma flip point.
+    Bar chart showing GEX per strike.
+
+    view_mode:
+      "Call / Put" — stacked call (blue) + put (red) bars with net GEX yellow line.
+      "Net GEX"    — single bar series coloured green (positive) / red (negative).
     """
     if gex_df.empty:
         fig = go.Figure()
         fig.update_layout(title=f"No options data available for {ticker}", template="plotly_dark")
         return fig
 
-    # Filter to ±10% of spot for readability
+    # Filter to ±range% of spot for readability
     lo = spot * (1 - strike_range_pct)
     hi = spot * (1 + strike_range_pct)
     sub = gex_df[(gex_df["strike"] >= lo) & (gex_df["strike"] <= hi)].copy()
@@ -182,36 +279,48 @@ def plot_gex_profile(gex_df: pd.DataFrame, spot: float, ticker: str,
 
     fig = go.Figure()
 
-    # Call GEX bars (positive)
-    fig.add_trace(go.Bar(
-        x=sub["strike"],
-        y=sub["call_gex_b"],
-        name="Call GEX",
-        marker_color="#4C9BE8",
-        opacity=0.8,
-        hovertemplate="Strike: %{x}<br>Call GEX: %{y:.3f}B<extra></extra>",
-    ))
+    if view_mode == "Net GEX":
+        # Color each bar by sign: green positive, red negative
+        colors = ["#5FC97B" if v >= 0 else "#E85C5C" for v in sub["net_gex_b"]]
+        fig.add_trace(go.Bar(
+            x=sub["strike"],
+            y=sub["net_gex_b"],
+            name="Net GEX",
+            marker_color=colors,
+            opacity=0.85,
+            hovertemplate="Strike: %{x}<br>Net GEX: %{y:.3f}B<extra></extra>",
+        ))
+    else:
+        # Call GEX bars (positive)
+        fig.add_trace(go.Bar(
+            x=sub["strike"],
+            y=sub["call_gex_b"],
+            name="Call GEX",
+            marker_color="#4C9BE8",
+            opacity=0.8,
+            hovertemplate="Strike: %{x}<br>Call GEX: %{y:.3f}B<extra></extra>",
+        ))
 
-    # Put GEX bars (negative)
-    fig.add_trace(go.Bar(
-        x=sub["strike"],
-        y=sub["put_gex_b"],
-        name="Put GEX",
-        marker_color="#E85C5C",
-        opacity=0.8,
-        hovertemplate="Strike: %{x}<br>Put GEX: %{y:.3f}B<extra></extra>",
-    ))
+        # Put GEX bars (negative)
+        fig.add_trace(go.Bar(
+            x=sub["strike"],
+            y=sub["put_gex_b"],
+            name="Put GEX",
+            marker_color="#E85C5C",
+            opacity=0.8,
+            hovertemplate="Strike: %{x}<br>Put GEX: %{y:.3f}B<extra></extra>",
+        ))
 
-    # Net GEX line
-    fig.add_trace(go.Scatter(
-        x=sub["strike"],
-        y=sub["net_gex_b"],
-        name="Net GEX",
-        mode="lines+markers",
-        line=dict(color="#F5E642", width=2),
-        marker=dict(size=4),
-        hovertemplate="Strike: %{x}<br>Net GEX: %{y:.3f}B<extra></extra>",
-    ))
+        # Net GEX line overlay
+        fig.add_trace(go.Scatter(
+            x=sub["strike"],
+            y=sub["net_gex_b"],
+            name="Net GEX",
+            mode="lines+markers",
+            line=dict(color="#F5E642", width=2),
+            marker=dict(size=4),
+            hovertemplate="Strike: %{x}<br>Net GEX: %{y:.3f}B<extra></extra>",
+        ))
 
     # Spot price line
     fig.add_vline(
@@ -237,9 +346,10 @@ def plot_gex_profile(gex_df: pd.DataFrame, spot: float, ticker: str,
             annotation_font_color=color,
         )
 
+    view_label = "Net" if view_mode == "Net GEX" else "Call / Put"
     fig.update_layout(
         barmode="relative",
-        title=f"{ticker} Dealer Gamma Exposure (GEX) Profile",
+        title=f"{ticker} Dealer GEX Profile — {view_label}",
         xaxis_title="Strike Price",
         yaxis_title="GEX ($ Billions)",
         template="plotly_dark",

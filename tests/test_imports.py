@@ -40,6 +40,7 @@ def test_gamma_exposure_exports():
         compute_gex,
         gex_flip_point,
         total_gex_metrics,
+        compute_gamma_index,
         plot_gex_profile,
         plot_gex_by_expiration,
     )

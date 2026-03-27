@@ -468,3 +468,145 @@ def test_plot_gex_by_expiration_returns_figure(options_dfs):
     calls, puts, spot = options_dfs
     fig = plot_gex_by_expiration(calls, puts, spot, "SPY")
     assert isinstance(fig, go.Figure)
+
+
+# ── View mode: Net GEX bars ─────────────────────────────────────────────────
+
+def test_plot_gex_profile_net_view_returns_figure(options_dfs):
+    """Net GEX view mode should produce a single bar trace (no call/put bars)."""
+    calls, puts, spot = options_dfs
+    gex_df = compute_gex(calls, puts, spot)
+    fig = plot_gex_profile(gex_df, spot, "SPY", view_mode="Net GEX")
+    assert isinstance(fig, go.Figure)
+    # Should have exactly 1 Bar trace (Net GEX) — no Scatter line
+    bar_traces = [t for t in fig.data if isinstance(t, go.Bar)]
+    scatter_traces = [t for t in fig.data if isinstance(t, go.Scatter)]
+    assert len(bar_traces) == 1, "Net GEX view should have a single bar trace"
+    assert len(scatter_traces) == 0, "Net GEX view should have no scatter line"
+
+
+def test_plot_gex_profile_call_put_view_has_three_traces(options_dfs):
+    """Call/Put view should have 2 Bar traces + 1 Scatter (net GEX line)."""
+    calls, puts, spot = options_dfs
+    gex_df = compute_gex(calls, puts, spot)
+    fig = plot_gex_profile(gex_df, spot, "SPY", view_mode="Call / Put")
+    bar_traces = [t for t in fig.data if isinstance(t, go.Bar)]
+    scatter_traces = [t for t in fig.data if isinstance(t, go.Scatter)]
+    assert len(bar_traces) == 2, "Call/Put view should have 2 bar traces"
+    assert len(scatter_traces) == 1, "Call/Put view should have 1 scatter line"
+
+
+# ── Gamma Index ──────────────────────────────────────────────────────────────
+
+from modules.gamma_exposure import compute_gamma_index
+
+
+def test_gamma_index_returns_expected_keys(options_dfs):
+    calls, puts, spot = options_dfs
+    gex_df = compute_gex(calls, puts, spot)
+    gi = compute_gamma_index(gex_df, spot)
+    expected = {
+        "gamma_index", "gamma_condition", "call_wall", "put_wall",
+        "gamma_flip", "gamma_tilt", "gamma_concentration", "top_strikes",
+    }
+    assert expected == set(gi.keys())
+
+
+def test_gamma_index_empty_input():
+    gi = compute_gamma_index(pd.DataFrame(), 400.0)
+    assert gi == {}
+
+
+def test_gamma_index_zero_spot(options_dfs):
+    calls, puts, _ = options_dfs
+    gex_df = compute_gex(calls, puts, 400.0)
+    gi = compute_gamma_index(gex_df, 0)
+    assert gi == {}
+
+
+def test_gamma_index_condition_positive():
+    """Positive total net GEX should give stabilizing condition."""
+    gex_df = pd.DataFrame({
+        "strike": [400.0, 410.0],
+        "call_gex": [1e9, 2e9],
+        "put_gex": [-0.5e9, -0.5e9],
+        "net_gex": [0.5e9, 1.5e9],
+        "call_gex_b": [1.0, 2.0],
+        "put_gex_b": [-0.5, -0.5],
+        "net_gex_b": [0.5, 1.5],
+    })
+    gi = compute_gamma_index(gex_df, 405.0)
+    assert gi["gamma_index"] > 0
+    assert "Stabilizing" in gi["gamma_condition"]
+
+
+def test_gamma_index_condition_negative():
+    """Negative total net GEX should give destabilizing condition."""
+    gex_df = pd.DataFrame({
+        "strike": [400.0, 410.0],
+        "call_gex": [0.5e9, 0.5e9],
+        "put_gex": [-2e9, -3e9],
+        "net_gex": [-1.5e9, -2.5e9],
+        "call_gex_b": [0.5, 0.5],
+        "put_gex_b": [-2.0, -3.0],
+        "net_gex_b": [-1.5, -2.5],
+    })
+    gi = compute_gamma_index(gex_df, 405.0)
+    assert gi["gamma_index"] < 0
+    assert "Destabilizing" in gi["gamma_condition"]
+
+
+def test_gamma_index_call_wall_is_peak_call_gex():
+    """Call wall should be the strike with the highest call GEX."""
+    gex_df = pd.DataFrame({
+        "strike": [390.0, 400.0, 410.0],
+        "call_gex": [1e9, 5e9, 2e9],
+        "put_gex": [-1e9, -1e9, -1e9],
+        "net_gex": [0, 4e9, 1e9],
+        "call_gex_b": [1.0, 5.0, 2.0],
+        "put_gex_b": [-1.0, -1.0, -1.0],
+        "net_gex_b": [0.0, 4.0, 1.0],
+    })
+    gi = compute_gamma_index(gex_df, 400.0)
+    assert gi["call_wall"] == 400.0
+
+
+def test_gamma_index_put_wall_is_most_negative_put_gex():
+    """Put wall should be the strike with the most negative put GEX."""
+    gex_df = pd.DataFrame({
+        "strike": [390.0, 400.0, 410.0],
+        "call_gex": [1e9, 1e9, 1e9],
+        "put_gex": [-1e9, -5e9, -2e9],
+        "net_gex": [0, -4e9, -1e9],
+        "call_gex_b": [1.0, 1.0, 1.0],
+        "put_gex_b": [-1.0, -5.0, -2.0],
+        "net_gex_b": [0.0, -4.0, -1.0],
+    })
+    gi = compute_gamma_index(gex_df, 400.0)
+    assert gi["put_wall"] == 400.0
+
+
+def test_gamma_tilt_bounds(options_dfs):
+    """Gamma tilt should be between 0 and 1."""
+    calls, puts, spot = options_dfs
+    gex_df = compute_gex(calls, puts, spot)
+    gi = compute_gamma_index(gex_df, spot)
+    assert 0.0 <= gi["gamma_tilt"] <= 1.0
+
+
+def test_gamma_concentration_bounds(options_dfs):
+    """Gamma concentration should be between 0 and 1."""
+    calls, puts, spot = options_dfs
+    gex_df = compute_gex(calls, puts, spot)
+    gi = compute_gamma_index(gex_df, spot)
+    assert 0.0 <= gi["gamma_concentration"] <= 1.0
+
+
+def test_gamma_index_top_strikes_max_five(options_dfs):
+    """Top strikes list should have at most 5 entries."""
+    calls, puts, spot = options_dfs
+    gex_df = compute_gex(calls, puts, spot)
+    gi = compute_gamma_index(gex_df, spot)
+    assert len(gi["top_strikes"]) <= 5
+    for s in gi["top_strikes"]:
+        assert "strike" in s and "net_gex_b" in s
