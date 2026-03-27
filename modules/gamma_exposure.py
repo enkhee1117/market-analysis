@@ -3,8 +3,10 @@ import numpy as np
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import streamlit as st
-from datetime import datetime
+from datetime import datetime, date
 from scipy.stats import norm
+import os
+import json
 
 
 # ── Black-Scholes Gamma ───────────────────────────────────────────────────────
@@ -250,6 +252,142 @@ def compute_gamma_index(gex_df: pd.DataFrame, spot: float) -> dict:
     }
 
 
+# ── Gamma Index History ──────────────────────────────────────────────────────
+
+_HISTORY_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "cache")
+_HISTORY_FILE = os.path.join(_HISTORY_DIR, "gamma_index_history.json")
+
+
+def _load_gi_history() -> list[dict]:
+    """Load the gamma-index history file (list of daily snapshots)."""
+    if os.path.exists(_HISTORY_FILE):
+        try:
+            with open(_HISTORY_FILE) as f:
+                return json.load(f)
+        except Exception:
+            return []
+    return []
+
+
+def _save_gi_history(history: list[dict]) -> None:
+    """Persist the gamma-index history list to disk."""
+    try:
+        os.makedirs(_HISTORY_DIR, exist_ok=True)
+        with open(_HISTORY_FILE, "w") as f:
+            json.dump(history, f, indent=2)
+    except Exception:
+        pass
+
+
+def save_gamma_index_snapshot(ticker: str, gamma_idx: dict, spot: float) -> None:
+    """
+    Append today's gamma-index snapshot to the history file.
+
+    One entry per (ticker, date) pair — overwrites if already present today.
+    """
+    if not gamma_idx:
+        return
+    today = date.today().isoformat()
+    entry = {
+        "date": today,
+        "ticker": ticker,
+        "spot": round(spot, 2),
+        "gamma_index": gamma_idx.get("gamma_index"),
+        "gamma_condition": gamma_idx.get("gamma_condition"),
+        "call_wall": gamma_idx.get("call_wall"),
+        "put_wall": gamma_idx.get("put_wall"),
+        "gamma_flip": gamma_idx.get("gamma_flip"),
+        "gamma_tilt": gamma_idx.get("gamma_tilt"),
+        "gamma_concentration": gamma_idx.get("gamma_concentration"),
+    }
+
+    history = _load_gi_history()
+    # Replace today's entry for this ticker if it exists
+    history = [h for h in history if not (h.get("date") == today and h.get("ticker") == ticker)]
+    history.append(entry)
+    # Keep last 365 days
+    history.sort(key=lambda x: x.get("date", ""))
+    history = history[-365:]
+    _save_gi_history(history)
+
+
+def load_gamma_index_history(ticker: str) -> pd.DataFrame:
+    """
+    Return a DataFrame of historical gamma-index snapshots for a ticker.
+
+    Columns: date, spot, gamma_index, call_wall, put_wall, gamma_flip, etc.
+    """
+    history = _load_gi_history()
+    rows = [h for h in history if h.get("ticker") == ticker]
+    if not rows:
+        return pd.DataFrame()
+    df = pd.DataFrame(rows)
+    df["date"] = pd.to_datetime(df["date"])
+    return df.sort_values("date").reset_index(drop=True)
+
+
+def plot_gamma_index_timeline(ticker: str) -> go.Figure:
+    """
+    Line chart of the Gamma Index over time, coloured by positive (green)
+    vs negative (red) regime, with a zero reference line.
+    """
+    df = load_gamma_index_history(ticker)
+
+    if df.empty or "gamma_index" not in df.columns:
+        fig = go.Figure()
+        fig.update_layout(
+            title=f"Gamma Index Timeline — {ticker} (no history yet)",
+            template="plotly_dark", height=350,
+            annotations=[dict(
+                text="History builds up one data-point per day.<br>Check back tomorrow!",
+                xref="paper", yref="paper", x=0.5, y=0.5,
+                showarrow=False, font=dict(size=16, color="#8B9BBF"),
+            )],
+        )
+        return fig
+
+    # Colour fill: green above zero, red below
+    pos = df["gamma_index"].clip(lower=0)
+    neg = df["gamma_index"].clip(upper=0)
+
+    fig = go.Figure()
+
+    # Positive area
+    fig.add_trace(go.Scatter(
+        x=df["date"], y=pos,
+        fill="tozeroy", fillcolor="rgba(95,201,123,0.25)",
+        line=dict(width=0), showlegend=False, hoverinfo="skip",
+    ))
+    # Negative area
+    fig.add_trace(go.Scatter(
+        x=df["date"], y=neg,
+        fill="tozeroy", fillcolor="rgba(232,92,92,0.25)",
+        line=dict(width=0), showlegend=False, hoverinfo="skip",
+    ))
+    # Main line
+    fig.add_trace(go.Scatter(
+        x=df["date"], y=df["gamma_index"],
+        mode="lines+markers",
+        name="Gamma Index",
+        line=dict(color="#F5E642", width=2),
+        marker=dict(size=5),
+        hovertemplate="Date: %{x|%Y-%m-%d}<br>GI: %{y:+.3f}B<extra></extra>",
+    ))
+
+    fig.add_hline(y=0, line_dash="dash", line_color="rgba(255,255,255,0.4)")
+
+    fig.update_layout(
+        title=f"{ticker} Gamma Index Timeline",
+        xaxis_title="Date",
+        yaxis_title="Gamma Index ($B)",
+        template="plotly_dark",
+        height=350,
+        legend=dict(orientation="h", y=1.05),
+        yaxis=dict(zeroline=True, zerolinecolor="rgba(255,255,255,0.4)"),
+    )
+    return fig
+
+
 # ── Charts ────────────────────────────────────────────────────────────────────
 
 def plot_gex_profile(gex_df: pd.DataFrame, spot: float, ticker: str,
@@ -309,17 +447,6 @@ def plot_gex_profile(gex_df: pd.DataFrame, spot: float, ticker: str,
             marker_color="#E85C5C",
             opacity=0.8,
             hovertemplate="Strike: %{x}<br>Put GEX: %{y:.3f}B<extra></extra>",
-        ))
-
-        # Net GEX line overlay
-        fig.add_trace(go.Scatter(
-            x=sub["strike"],
-            y=sub["net_gex_b"],
-            name="Net GEX",
-            mode="lines+markers",
-            line=dict(color="#F5E642", width=2),
-            marker=dict(size=4),
-            hovertemplate="Strike: %{x}<br>Net GEX: %{y:.3f}B<extra></extra>",
         ))
 
     # Spot price line

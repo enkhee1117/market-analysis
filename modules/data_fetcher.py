@@ -334,7 +334,7 @@ def _fetch_options_chain_yfinance(ticker: str):
 
     all_calls = []
     all_puts = []
-    for exp in expirations[:8]:
+    for exp in expirations:  # fetch all available expirations
         try:
             chain = tk.option_chain(exp)
             calls = chain.calls.copy()

@@ -485,15 +485,15 @@ def test_plot_gex_profile_net_view_returns_figure(options_dfs):
     assert len(scatter_traces) == 0, "Net GEX view should have no scatter line"
 
 
-def test_plot_gex_profile_call_put_view_has_three_traces(options_dfs):
-    """Call/Put view should have 2 Bar traces + 1 Scatter (net GEX line)."""
+def test_plot_gex_profile_call_put_view_has_two_bar_traces(options_dfs):
+    """Call/Put view should have 2 Bar traces (call + put), no net GEX line."""
     calls, puts, spot = options_dfs
     gex_df = compute_gex(calls, puts, spot)
     fig = plot_gex_profile(gex_df, spot, "SPY", view_mode="Call / Put")
     bar_traces = [t for t in fig.data if isinstance(t, go.Bar)]
     scatter_traces = [t for t in fig.data if isinstance(t, go.Scatter)]
     assert len(bar_traces) == 2, "Call/Put view should have 2 bar traces"
-    assert len(scatter_traces) == 1, "Call/Put view should have 1 scatter line"
+    assert len(scatter_traces) == 0, "Call/Put view should have no scatter lines"
 
 
 # ── Gamma Index ──────────────────────────────────────────────────────────────
@@ -610,3 +610,98 @@ def test_gamma_index_top_strikes_max_five(options_dfs):
     assert len(gi["top_strikes"]) <= 5
     for s in gi["top_strikes"]:
         assert "strike" in s and "net_gex_b" in s
+
+
+# ── Gamma Index History & Timeline ──────────────────────────────────────────
+
+from modules.gamma_exposure import (
+    save_gamma_index_snapshot,
+    load_gamma_index_history,
+    plot_gamma_index_timeline,
+    _HISTORY_FILE,
+)
+import json
+import os
+
+
+def test_save_and_load_gamma_index_history(tmp_path, monkeypatch):
+    """Saving a snapshot should be retrievable via load_gamma_index_history."""
+    hist_file = str(tmp_path / "gamma_index_history.json")
+    monkeypatch.setattr("modules.gamma_exposure._HISTORY_FILE", hist_file)
+    monkeypatch.setattr("modules.gamma_exposure._HISTORY_DIR", str(tmp_path))
+
+    gi = {"gamma_index": 1.234, "gamma_condition": "Positive (Stabilizing)",
+          "call_wall": 410.0, "put_wall": 390.0, "gamma_flip": 400.0,
+          "gamma_tilt": 0.6, "gamma_concentration": 0.45, "top_strikes": []}
+
+    save_gamma_index_snapshot("SPY", gi, 405.0)
+    df = load_gamma_index_history("SPY")
+    assert len(df) == 1
+    assert df["gamma_index"].iloc[0] == 1.234
+    assert df["spot"].iloc[0] == 405.0
+
+
+def test_save_snapshot_overwrites_same_day(tmp_path, monkeypatch):
+    """Saving twice on the same day should keep only one entry."""
+    hist_file = str(tmp_path / "gamma_index_history.json")
+    monkeypatch.setattr("modules.gamma_exposure._HISTORY_FILE", hist_file)
+    monkeypatch.setattr("modules.gamma_exposure._HISTORY_DIR", str(tmp_path))
+
+    gi1 = {"gamma_index": 1.0, "gamma_condition": "Positive (Stabilizing)",
+           "call_wall": None, "put_wall": None, "gamma_flip": None,
+           "gamma_tilt": 0.5, "gamma_concentration": 0.3, "top_strikes": []}
+    gi2 = {"gamma_index": 2.0, "gamma_condition": "Positive (Stabilizing)",
+           "call_wall": None, "put_wall": None, "gamma_flip": None,
+           "gamma_tilt": 0.5, "gamma_concentration": 0.3, "top_strikes": []}
+
+    save_gamma_index_snapshot("SPY", gi1, 400.0)
+    save_gamma_index_snapshot("SPY", gi2, 401.0)
+    df = load_gamma_index_history("SPY")
+    assert len(df) == 1
+    assert df["gamma_index"].iloc[0] == 2.0  # second value wins
+
+
+def test_load_history_empty_for_unknown_ticker(tmp_path, monkeypatch):
+    hist_file = str(tmp_path / "gamma_index_history.json")
+    monkeypatch.setattr("modules.gamma_exposure._HISTORY_FILE", hist_file)
+    df = load_gamma_index_history("AAPL")
+    assert df.empty
+
+
+def test_save_snapshot_skips_empty_gamma_idx(tmp_path, monkeypatch):
+    """Passing an empty dict should not write anything."""
+    hist_file = str(tmp_path / "gamma_index_history.json")
+    monkeypatch.setattr("modules.gamma_exposure._HISTORY_FILE", hist_file)
+    monkeypatch.setattr("modules.gamma_exposure._HISTORY_DIR", str(tmp_path))
+    save_gamma_index_snapshot("SPY", {}, 400.0)
+    assert not os.path.exists(hist_file)
+
+
+def test_plot_gamma_index_timeline_empty():
+    """Timeline chart with no history should still return a valid Figure."""
+    fig = plot_gamma_index_timeline("AAPL")  # no history for AAPL
+    assert isinstance(fig, go.Figure)
+
+
+def test_plot_gamma_index_timeline_with_data(tmp_path, monkeypatch):
+    """Timeline chart should render with historical data."""
+    hist_file = str(tmp_path / "gamma_index_history.json")
+    monkeypatch.setattr("modules.gamma_exposure._HISTORY_FILE", hist_file)
+    # Write some fake history
+    history = [
+        {"date": "2026-03-25", "ticker": "SPY", "spot": 640, "gamma_index": 1.5,
+         "gamma_condition": "Positive (Stabilizing)", "call_wall": 660,
+         "put_wall": 620, "gamma_flip": 645, "gamma_tilt": 0.55,
+         "gamma_concentration": 0.4},
+        {"date": "2026-03-26", "ticker": "SPY", "spot": 645, "gamma_index": -0.5,
+         "gamma_condition": "Negative (Destabilizing)", "call_wall": 660,
+         "put_wall": 620, "gamma_flip": 640, "gamma_tilt": 0.45,
+         "gamma_concentration": 0.35},
+    ]
+    with open(hist_file, "w") as f:
+        json.dump(history, f)
+
+    fig = plot_gamma_index_timeline("SPY")
+    assert isinstance(fig, go.Figure)
+    # Should have 3 traces: positive fill, negative fill, main line
+    assert len(fig.data) == 3

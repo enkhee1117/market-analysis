@@ -35,8 +35,10 @@ from modules.gamma_exposure import (
     gex_flip_point,
     total_gex_metrics,
     compute_gamma_index,
+    save_gamma_index_snapshot,
     plot_gex_profile,
     plot_gex_by_expiration,
+    plot_gamma_index_timeline,
 )
 from modules.vix_analysis import (
     compute_vix_metrics,
@@ -283,6 +285,8 @@ with tab2:
         flip    = gex_flip_point(gex_df)
         metrics = total_gex_metrics(gex_df)
         gamma_idx = compute_gamma_index(gex_df, spot)
+        # Persist today's gamma index for the timeline chart
+        save_gamma_index_snapshot(gex_ticker, gamma_idx, spot)
 
     if gex_df.empty:
         st.warning("GEX data empty — options gamma/OI fields may be missing in the data.")
@@ -337,6 +341,10 @@ with tab2:
                 .map(_ts_color, subset=["Net GEX ($B)"]),
                 use_container_width=True, hide_index=True,
             )
+
+    # Gamma Index timeline
+    fig_gi_timeline = plot_gamma_index_timeline(gex_ticker)
+    st.plotly_chart(fig_gi_timeline, use_container_width=True)
 
     st.markdown("---")
 

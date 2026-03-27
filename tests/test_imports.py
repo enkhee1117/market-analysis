@@ -41,8 +41,11 @@ def test_gamma_exposure_exports():
         gex_flip_point,
         total_gex_metrics,
         compute_gamma_index,
+        save_gamma_index_snapshot,
+        load_gamma_index_history,
         plot_gex_profile,
         plot_gex_by_expiration,
+        plot_gamma_index_timeline,
     )
 
 
