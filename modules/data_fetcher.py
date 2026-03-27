@@ -111,13 +111,51 @@ def fetch_multi_tickers(tickers: list, period: str = "1y", interval: str = "1d")
     return pd.DataFrame()
 
 
+# ── Massive.com API ──────────────────────────────────────────────────────────
+
+MASSIVE_BASE_URL = "https://api.massive.com/v3"
+
+
+def _get_massive_api_key() -> str | None:
+    """Retrieve Massive API key from Streamlit secrets or environment."""
+    try:
+        return st.secrets["MASSIVE_API_KEY"]
+    except Exception:
+        return os.environ.get("MASSIVE_API_KEY")
+
+
+def _massive_get(endpoint: str, params: dict | None = None) -> dict | None:
+    """Make an authenticated GET request to Massive.com API."""
+    import requests
+
+    api_key = _get_massive_api_key()
+    if not api_key:
+        return None
+
+    url = f"{MASSIVE_BASE_URL}{endpoint}"
+    params = params or {}
+    params["apiKey"] = api_key
+
+    try:
+        resp = requests.get(url, params=params, timeout=30)
+        resp.raise_for_status()
+        return resp.json()
+    except Exception:
+        return None
+
+
 @st.cache_data(ttl=86400)
-def fetch_options_chain(ticker: str):
-    """Fetch all options chains for nearest expirations (up to 8). Cached to disk daily."""
-    # Check for cached data first
-    calls_cache_key = f"{ticker}_options_calls"
-    puts_cache_key = f"{ticker}_options_puts"
-    spot_path = _cache_path(f"{ticker}_options_spot", ext="json")
+def fetch_options_chain_massive(ticker: str):
+    """
+    Fetch full options chain from Massive.com API.
+    Returns (calls_df, puts_df, spot) matching the format expected by compute_gex().
+
+    Paginates through all results (250 per page).
+    """
+    # Check file cache first
+    calls_cache_key = f"{ticker}_massive_calls"
+    puts_cache_key = f"{ticker}_massive_puts"
+    spot_path = _cache_path(f"{ticker}_massive_spot", ext="json")
 
     cached_calls = _read_cache(calls_cache_key)
     cached_puts = _read_cache(puts_cache_key)
@@ -132,7 +170,126 @@ def fetch_options_chain(ticker: str):
     if cached_calls is not None and cached_puts is not None and cached_spot is not None:
         return cached_calls, cached_puts, cached_spot
 
-    # Fetch fresh from Yahoo Finance
+    # Fetch from Massive.com API with pagination
+    all_results = []
+    endpoint = f"/snapshot/options/{ticker}"
+    params = {"limit": 250, "order": "asc", "sort": "ticker"}
+
+    while endpoint:
+        data = _massive_get(endpoint, params)
+        if data is None or data.get("status") != "OK":
+            break
+
+        results = data.get("results", [])
+        if not results:
+            break
+        all_results.extend(results)
+
+        # Handle pagination
+        next_url = data.get("next_url")
+        if next_url:
+            # next_url is a full URL; extract path and params
+            from urllib.parse import urlparse, parse_qs
+            parsed = urlparse(next_url)
+            endpoint = parsed.path.replace("/v3", "", 1) if "/v3" in parsed.path else parsed.path
+            params = {k: v[0] for k, v in parse_qs(parsed.query).items()}
+            # Remove apiKey from params (we add it in _massive_get)
+            params.pop("apiKey", None)
+        else:
+            break
+
+    if not all_results:
+        return None, None, None
+
+    # Parse results into calls_df and puts_df
+    calls_rows = []
+    puts_rows = []
+    spot = None
+
+    for contract in all_results:
+        details = contract.get("details", {})
+        greeks = contract.get("greeks", {})
+        underlying = contract.get("underlying_asset", {})
+
+        if spot is None and underlying.get("price"):
+            spot = underlying["price"]
+
+        row = {
+            "strike": details.get("strike_price"),
+            "expiration": details.get("expiration_date"),
+            "gamma": greeks.get("gamma", 0) or 0,
+            "delta": greeks.get("delta", 0) or 0,
+            "theta": greeks.get("theta", 0) or 0,
+            "vega": greeks.get("vega", 0) or 0,
+            "openInterest": contract.get("open_interest", 0) or 0,
+            "impliedVolatility": contract.get("implied_volatility", 0) or 0,
+            "volume": contract.get("day", {}).get("volume", 0) or 0,
+            "contractSymbol": details.get("ticker", ""),
+        }
+
+        if row["strike"] is None:
+            continue
+
+        contract_type = details.get("contract_type", "")
+        if contract_type == "call":
+            calls_rows.append(row)
+        elif contract_type == "put":
+            puts_rows.append(row)
+
+    calls_df = pd.DataFrame(calls_rows) if calls_rows else pd.DataFrame()
+    puts_df = pd.DataFrame(puts_rows) if puts_rows else pd.DataFrame()
+
+    # Write to cache
+    _write_cache(calls_cache_key, calls_df)
+    _write_cache(puts_cache_key, puts_df)
+    if spot is not None:
+        try:
+            os.makedirs(CACHE_DIR, exist_ok=True)
+            with open(spot_path, "w") as f:
+                json.dump({"spot": spot}, f)
+        except Exception:
+            pass
+
+    return calls_df, puts_df, spot
+
+
+# ── Options chain (with Massive fallback to Yahoo) ───────────────────────────
+
+@st.cache_data(ttl=86400)
+def fetch_options_chain(ticker: str):
+    """
+    Fetch options chain. Uses Massive.com API if an API key is configured,
+    otherwise falls back to Yahoo Finance. Cached to disk daily.
+    """
+    # Try Massive.com first if API key is available
+    if _get_massive_api_key():
+        result = fetch_options_chain_massive(ticker)
+        if result and result[0] is not None and not result[0].empty:
+            return result
+
+    # Fallback: Yahoo Finance
+    return _fetch_options_chain_yfinance(ticker)
+
+
+def _fetch_options_chain_yfinance(ticker: str):
+    """Fetch options chain from Yahoo Finance (fallback)."""
+    calls_cache_key = f"{ticker}_yf_options_calls"
+    puts_cache_key = f"{ticker}_yf_options_puts"
+    spot_path = _cache_path(f"{ticker}_yf_options_spot", ext="json")
+
+    cached_calls = _read_cache(calls_cache_key)
+    cached_puts = _read_cache(puts_cache_key)
+    cached_spot = None
+    if os.path.exists(spot_path):
+        try:
+            with open(spot_path) as f:
+                cached_spot = json.load(f).get("spot")
+        except Exception:
+            pass
+
+    if cached_calls is not None and cached_puts is not None and cached_spot is not None:
+        return cached_calls, cached_puts, cached_spot
+
     tk = yf.Ticker(ticker)
     try:
         expirations = tk.options
@@ -165,14 +322,13 @@ def fetch_options_chain(ticker: str):
             puts["expiration"] = exp
             all_calls.append(calls)
             all_puts.append(puts)
-            time.sleep(0.2)  # Rate-limit protection
+            time.sleep(0.2)
         except Exception:
             continue
 
     calls_df = pd.concat(all_calls, ignore_index=True) if all_calls else pd.DataFrame()
     puts_df = pd.concat(all_puts, ignore_index=True) if all_puts else pd.DataFrame()
 
-    # Write to cache
     _write_cache(calls_cache_key, calls_df)
     _write_cache(puts_cache_key, puts_df)
     if spot is not None:
