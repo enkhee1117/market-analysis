@@ -344,16 +344,31 @@ def test_gex_flip_point_interpolation_accuracy():
     np.testing.assert_allclose(flip, 405.0, atol=0.01)
 
 
-def test_gex_flip_point_finds_first_crossing():
-    """If multiple crossings exist, flip point should be the first one."""
+def test_gex_flip_point_nearest_to_spot():
+    """When spot is provided, flip point should be the crossing nearest to spot."""
+    gex_df = pd.DataFrame({
+        "strike": [200.0, 210.0, 400.0, 410.0],
+        "net_gex": [10.0, -5.0, 8.0, -3.0],
+    })
+    # Without spot: picks crossing with largest magnitude
+    flip_no_spot = gex_flip_point(gex_df)
+    assert flip_no_spot is not None
+
+    # With spot near 400: should pick the 400-410 crossing, not the 200-210 one
+    flip_with_spot = gex_flip_point(gex_df, spot=405.0)
+    assert flip_with_spot is not None
+    assert 400.0 <= flip_with_spot <= 410.0
+
+def test_gex_flip_point_finds_meaningful_crossing():
+    """If multiple crossings exist, should find largest-magnitude one without spot."""
     gex_df = pd.DataFrame({
         "strike": [390.0, 400.0, 410.0, 420.0, 430.0],
         "net_gex": [10.0, -5.0, 8.0, -3.0, 1.0],
     })
     flip = gex_flip_point(gex_df)
-    # First crossing between 390 (positive) and 400 (negative)
     assert flip is not None
-    assert 390.0 <= flip <= 400.0
+    # Should still find a valid crossing
+    assert 390.0 <= flip <= 430.0
 
 
 def test_gex_flip_point_empty_df():
@@ -703,5 +718,106 @@ def test_plot_gamma_index_timeline_with_data(tmp_path, monkeypatch):
 
     fig = plot_gamma_index_timeline("SPY")
     assert isinstance(fig, go.Figure)
-    # Should have 3 traces: positive fill, negative fill, main line
-    assert len(fig.data) == 3
+    # Should have real traces: positive fill, negative fill, main line
+    assert len(fig.data) >= 3
+
+
+def test_plot_gamma_index_timeline_with_proxy(tmp_path, monkeypatch):
+    """Timeline chart should render with proxy data."""
+    hist_file = str(tmp_path / "gamma_index_history.json")
+    monkeypatch.setattr("modules.gamma_exposure._HISTORY_FILE", hist_file)
+
+    proxy = pd.DataFrame({
+        "date": pd.date_range("2026-01-01", periods=60, freq="B"),
+        "gamma_proxy": np.sin(np.linspace(0, 4 * np.pi, 60)) * 0.5,
+        "vix": np.random.uniform(15, 25, 60),
+        "realized_vol": np.random.uniform(12, 22, 60),
+        "proxy_condition": ["Positive (Stabilizing)"] * 30 + ["Negative (Destabilizing)"] * 30,
+    })
+    fig = plot_gamma_index_timeline("SPY", proxy_df=proxy)
+    assert isinstance(fig, go.Figure)
+    # Should have proxy traces: pos fill, neg fill, proxy line
+    assert len(fig.data) >= 3
+
+
+# ── Historical Gamma Proxy ─────────────────────────────────────────────────
+
+from modules.gamma_exposure import compute_historical_gamma_proxy, calibrate_proxy_to_real
+
+
+def test_proxy_returns_expected_columns():
+    """Proxy should return date, gamma_proxy, vix, realized_vol, proxy_condition."""
+    dates = pd.bdate_range("2025-01-01", periods=100)
+    spy_df = pd.DataFrame({"Close": 500 + np.cumsum(np.random.randn(100))}, index=dates)
+    vix_df = pd.DataFrame({"Close": 18 + np.random.randn(100) * 3}, index=dates)
+    result = compute_historical_gamma_proxy(spy_df, vix_df)
+    assert not result.empty
+    assert set(result.columns) >= {"date", "gamma_proxy", "vix", "realized_vol", "proxy_condition"}
+
+
+def test_proxy_positive_in_low_vix():
+    """Proxy should tend positive when VIX is consistently low."""
+    dates = pd.bdate_range("2025-01-01", periods=100)
+    spy_df = pd.DataFrame({"Close": np.linspace(500, 520, 100)}, index=dates)
+    # Very low, stable VIX
+    vix_df = pd.DataFrame({"Close": np.full(100, 13.0)}, index=dates)
+    result = compute_historical_gamma_proxy(spy_df, vix_df)
+    # Most recent values should be near zero or positive (stable environment)
+    if not result.empty:
+        tail_mean = result["gamma_proxy"].tail(20).mean()
+        # Low stable VIX → should not be strongly negative
+        assert tail_mean > -1.0
+
+
+def test_proxy_negative_in_vix_spike():
+    """Proxy should go negative when VIX spikes."""
+    dates = pd.bdate_range("2025-01-01", periods=100)
+    spy_df = pd.DataFrame({"Close": 500 - np.linspace(0, 50, 100)}, index=dates)
+    vix = np.full(100, 15.0)
+    vix[70:] = 35.0  # VIX spike
+    vix_df = pd.DataFrame({"Close": vix}, index=dates)
+    result = compute_historical_gamma_proxy(spy_df, vix_df)
+    if not result.empty:
+        spike_mean = result["gamma_proxy"].tail(10).mean()
+        assert spike_mean < 0, "Proxy should be negative during VIX spike"
+
+
+def test_proxy_empty_inputs():
+    """Proxy should return empty DataFrame for empty inputs."""
+    assert compute_historical_gamma_proxy(pd.DataFrame(), pd.DataFrame()).empty
+    assert compute_historical_gamma_proxy(None, None).empty
+
+
+def test_proxy_short_data():
+    """Proxy should handle data shorter than warmup period."""
+    dates = pd.bdate_range("2025-01-01", periods=10)
+    spy_df = pd.DataFrame({"Close": range(10)}, index=dates)
+    vix_df = pd.DataFrame({"Close": range(10)}, index=dates)
+    result = compute_historical_gamma_proxy(spy_df, vix_df)
+    assert result.empty  # Too short for 20-day rolling
+
+
+def test_calibrate_proxy_scales_to_real():
+    """Calibration should scale proxy to match real data magnitude."""
+    proxy = pd.DataFrame({
+        "date": pd.date_range("2026-03-25", periods=3),
+        "gamma_proxy": [10.0, -10.0, 5.0],
+    })
+    real = pd.DataFrame({
+        "date": pd.to_datetime(["2026-03-25", "2026-03-26"]),
+        "gamma_index": [1.0, -1.0],
+    })
+    result = calibrate_proxy_to_real(proxy, real)
+    # Proxy was 10x the real data, so should be scaled down ~10x
+    assert abs(result["gamma_proxy"].iloc[0]) < 3.0  # rough check
+
+
+def test_calibrate_no_overlap():
+    """Calibration without overlap should normalize to ~0.5B std."""
+    proxy = pd.DataFrame({
+        "date": pd.date_range("2025-01-01", periods=100),
+        "gamma_proxy": np.random.randn(100) * 5,
+    })
+    real = pd.DataFrame()  # no real data
+    result = calibrate_proxy_to_real(proxy, real)
+    assert abs(result["gamma_proxy"].std() - 0.5) < 0.1

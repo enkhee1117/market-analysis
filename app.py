@@ -40,6 +40,7 @@ from modules.gamma_exposure import (
     gex_flip_point,
     total_gex_metrics,
     compute_gamma_index,
+    compute_historical_gamma_proxy,
     save_gamma_index_snapshot,
     plot_gex_profile,
     plot_gex_by_expiration,
@@ -409,8 +410,14 @@ with tab2:
                 use_container_width=True, hide_index=True,
             )
 
-    # Gamma Index timeline
-    fig_gi_timeline = plot_gamma_index_timeline(gex_ticker)
+    # Gamma Index timeline (real data + historical proxy from VIX/SPY)
+    with st.spinner("Building Gamma Index timeline..."):
+        # Fetch VIX + SPY history for the proxy (reuses cached data)
+        _spy_hist_for_proxy = fetch_price_history("SPY", period="2y", interval="1d")
+        _vix_hist_for_proxy = fetch_price_history("^VIX", period="2y", interval="1d")
+        _proxy_df = compute_historical_gamma_proxy(_spy_hist_for_proxy, _vix_hist_for_proxy)
+
+    fig_gi_timeline = plot_gamma_index_timeline(gex_ticker, proxy_df=_proxy_df)
     st.plotly_chart(fig_gi_timeline, use_container_width=True)
 
     st.markdown("---")

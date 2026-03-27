@@ -371,18 +371,156 @@ def load_gamma_index_history(ticker: str) -> pd.DataFrame:
     return df.sort_values("date").reset_index(drop=True)
 
 
-def plot_gamma_index_timeline(ticker: str) -> go.Figure:
+def compute_historical_gamma_proxy(spy_df: pd.DataFrame, vix_df: pd.DataFrame) -> pd.DataFrame:
     """
-    Line chart of the Gamma Index over time, coloured by positive (green)
-    vs negative (red) regime, with a zero reference line.
-    """
-    df = load_gamma_index_history(ticker)
+    Compute a historical Gamma Environment Proxy from VIX and SPY data.
 
-    if df.empty or "gamma_index" not in df.columns:
+    The proxy is based on established options market microstructure:
+    - When VIX is low / declining → dealers are likely in positive gamma
+      (net long gamma via sold puts that are far OTM).  Market is pinned,
+      realized vol < implied vol.
+    - When VIX is high / spiking → dealers are likely in negative gamma
+      (short gamma from bought protection / unwound positions).  Moves
+      are amplified, realized vol > implied vol.
+
+    Proxy signal per day
+    --------------------
+    1. VIX z-score (20d rolling) — captures regime relative to recent history.
+    2. Implied-vs-Realized spread — VIX minus 20d realized vol of SPY.
+       Positive spread → implied > realized → positive-gamma pinning.
+    3. Combine:  proxy = −vix_z × (1 + iv_rv_spread / 100)
+       Flip sign because low-VIX = positive-gamma.
+    4. Normalise to have the same scale as real gamma index where overlap exists.
+
+    Returns a DataFrame with columns: date, gamma_proxy, proxy_condition.
+    """
+    if spy_df is None or spy_df.empty or vix_df is None or vix_df.empty:
+        return pd.DataFrame()
+
+    # Prepare SPY data
+    spy = spy_df.copy()
+    if "Close" not in spy.columns:
+        return pd.DataFrame()
+    spy = spy[["Close"]].dropna()
+    spy.index = pd.to_datetime(spy.index)
+
+    # Prepare VIX data
+    vix = vix_df.copy()
+    if isinstance(vix, pd.DataFrame):
+        if "VIX" in vix.columns:
+            vix = vix[["VIX"]].dropna()
+            vix.columns = ["vix"]
+        elif "Close" in vix.columns:
+            vix = vix[["Close"]].dropna()
+            vix.columns = ["vix"]
+        else:
+            return pd.DataFrame()
+    vix.index = pd.to_datetime(vix.index)
+
+    # Merge on date
+    merged = spy.join(vix, how="inner").dropna()
+    if len(merged) < 30:
+        return pd.DataFrame()
+
+    # 1. VIX z-score (20-day rolling)
+    vix_roll = merged["vix"].rolling(20)
+    merged["vix_z"] = (merged["vix"] - vix_roll.mean()) / vix_roll.std()
+
+    # 2. Realized vol of SPY (20-day annualized)
+    merged["spy_ret"] = merged["Close"].pct_change()
+    merged["realized_vol"] = merged["spy_ret"].rolling(20).std() * np.sqrt(252) * 100
+
+    # 3. IV - RV spread (VIX is annualized % already)
+    merged["iv_rv_spread"] = merged["vix"] - merged["realized_vol"]
+
+    # 4. Raw proxy: negative VIX z-score, amplified by IV-RV spread
+    #    When VIX is below average (z < 0) → proxy is positive (positive gamma)
+    #    When VIX is above average (z > 0) → proxy is negative (negative gamma)
+    #    IV-RV spread > 0 amplifies positive gamma (dealers collecting premium)
+    merged["raw_proxy"] = -merged["vix_z"] * (1 + merged["iv_rv_spread"].clip(-50, 50) / 100)
+
+    # 5. Smooth with 5-day EMA for less noise
+    merged["gamma_proxy"] = merged["raw_proxy"].ewm(span=5, adjust=False).mean()
+
+    # Drop warmup period
+    merged = merged.dropna(subset=["gamma_proxy"])
+
+    # Build result
+    result = pd.DataFrame({
+        "date": merged.index,
+        "gamma_proxy": merged["gamma_proxy"].values,
+        "vix": merged["vix"].values,
+        "realized_vol": merged["realized_vol"].values,
+    }).reset_index(drop=True)
+
+    result["proxy_condition"] = result["gamma_proxy"].apply(
+        lambda x: "Positive (Stabilizing)" if x > 0 else "Negative (Destabilizing)"
+    )
+
+    return result
+
+
+def calibrate_proxy_to_real(proxy_df: pd.DataFrame, real_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Scale the proxy so its magnitude matches the real gamma index
+    where we have overlapping data points.
+
+    If no overlap exists, normalize proxy to have a reasonable scale
+    (std ≈ 0.5B to match typical GEX magnitudes).
+    """
+    if proxy_df.empty:
+        return proxy_df
+
+    proxy = proxy_df.copy()
+
+    if not real_df.empty and "gamma_index" in real_df.columns and len(real_df) >= 2:
+        # Find overlapping dates
+        real_dates = set(pd.to_datetime(real_df["date"]).dt.date)
+        proxy["_date"] = pd.to_datetime(proxy["date"]).dt.date
+        overlap = proxy[proxy["_date"].isin(real_dates)]
+
+        if len(overlap) >= 1:
+            # Scale factor: match the mean absolute magnitude
+            real_vals = real_df.set_index(pd.to_datetime(real_df["date"]).dt.date)["gamma_index"]
+            proxy_vals = overlap.set_index("_date")["gamma_proxy"]
+            common = proxy_vals.index.intersection(real_vals.index)
+            if len(common) >= 1:
+                real_scale = real_vals.loc[common].abs().mean()
+                proxy_scale = proxy_vals.loc[common].abs().mean()
+                if proxy_scale > 0:
+                    scale = real_scale / proxy_scale
+                    proxy["gamma_proxy"] *= scale
+                    proxy.drop(columns=["_date"], inplace=True)
+                    return proxy
+
+        proxy.drop(columns=["_date"], inplace=True)
+
+    # No overlap: normalize to ~0.5B std (typical magnitude)
+    proxy_std = proxy["gamma_proxy"].std()
+    if proxy_std > 0:
+        proxy["gamma_proxy"] = proxy["gamma_proxy"] / proxy_std * 0.5
+
+    return proxy
+
+
+def plot_gamma_index_timeline(ticker: str, proxy_df: pd.DataFrame | None = None) -> go.Figure:
+    """
+    Line chart of the Gamma Index over time.
+
+    Shows:
+    - Real Gamma Index (solid yellow line) — from daily snapshots.
+    - Historical Proxy (dashed gray line) — from VIX/SPY-derived estimate.
+    - Green/red fill for positive/negative gamma regimes.
+    """
+    real_df = load_gamma_index_history(ticker)
+    has_real = not real_df.empty and "gamma_index" in real_df.columns
+    has_proxy = proxy_df is not None and not proxy_df.empty
+
+    if not has_real and not has_proxy:
         fig = go.Figure()
         fig.update_layout(
             title=f"Gamma Index Timeline — {ticker} (no history yet)",
-            template="plotly_dark", height=350,
+            template="plotly_dark", height=400,
             annotations=[dict(
                 text="History builds up one data-point per day.<br>Check back tomorrow!",
                 xref="paper", yref="paper", x=0.5, y=0.5,
@@ -391,33 +529,66 @@ def plot_gamma_index_timeline(ticker: str) -> go.Figure:
         )
         return fig
 
-    # Colour fill: green above zero, red below
-    pos = df["gamma_index"].clip(lower=0)
-    neg = df["gamma_index"].clip(upper=0)
-
     fig = go.Figure()
 
-    # Positive area
-    fig.add_trace(go.Scatter(
-        x=df["date"], y=pos,
-        fill="tozeroy", fillcolor="rgba(95,201,123,0.25)",
-        line=dict(width=0), showlegend=False, hoverinfo="skip",
-    ))
-    # Negative area
-    fig.add_trace(go.Scatter(
-        x=df["date"], y=neg,
-        fill="tozeroy", fillcolor="rgba(232,92,92,0.25)",
-        line=dict(width=0), showlegend=False, hoverinfo="skip",
-    ))
-    # Main line
-    fig.add_trace(go.Scatter(
-        x=df["date"], y=df["gamma_index"],
-        mode="lines+markers",
-        name="Gamma Index",
-        line=dict(color="#F5E642", width=2),
-        marker=dict(size=5),
-        hovertemplate="Date: %{x|%Y-%m-%d}<br>GI: %{y:+.3f}B<extra></extra>",
-    ))
+    # ── Historical Proxy (background) ──
+    if has_proxy:
+        pdf = proxy_df.copy()
+        pdf["date"] = pd.to_datetime(pdf["date"])
+
+        # Calibrate proxy to real data if available
+        if has_real:
+            pdf = calibrate_proxy_to_real(pdf, real_df)
+
+        # Positive/negative fill areas for proxy
+        pos_proxy = pdf["gamma_proxy"].clip(lower=0)
+        neg_proxy = pdf["gamma_proxy"].clip(upper=0)
+
+        fig.add_trace(go.Scatter(
+            x=pdf["date"], y=pos_proxy,
+            fill="tozeroy", fillcolor="rgba(95,201,123,0.12)",
+            line=dict(width=0), showlegend=False, hoverinfo="skip",
+        ))
+        fig.add_trace(go.Scatter(
+            x=pdf["date"], y=neg_proxy,
+            fill="tozeroy", fillcolor="rgba(232,92,92,0.12)",
+            line=dict(width=0), showlegend=False, hoverinfo="skip",
+        ))
+
+        # Proxy line
+        fig.add_trace(go.Scatter(
+            x=pdf["date"], y=pdf["gamma_proxy"],
+            mode="lines",
+            name="Gamma Proxy (VIX-derived)",
+            line=dict(color="rgba(180,180,180,0.5)", width=1.5, dash="dot"),
+            hovertemplate="Date: %{x|%Y-%m-%d}<br>Proxy: %{y:+.3f}<extra></extra>",
+        ))
+
+    # ── Real Gamma Index (foreground) ──
+    if has_real:
+        # Colour fill: green above zero, red below
+        pos = real_df["gamma_index"].clip(lower=0)
+        neg = real_df["gamma_index"].clip(upper=0)
+
+        fig.add_trace(go.Scatter(
+            x=real_df["date"], y=pos,
+            fill="tozeroy", fillcolor="rgba(95,201,123,0.3)",
+            line=dict(width=0), showlegend=False, hoverinfo="skip",
+        ))
+        fig.add_trace(go.Scatter(
+            x=real_df["date"], y=neg,
+            fill="tozeroy", fillcolor="rgba(232,92,92,0.3)",
+            line=dict(width=0), showlegend=False, hoverinfo="skip",
+        ))
+        # Main real line
+        fig.add_trace(go.Scatter(
+            x=real_df["date"], y=real_df["gamma_index"],
+            mode="lines+markers",
+            name="Gamma Index (Real)",
+            line=dict(color="#F5E642", width=2.5),
+            marker=dict(size=6),
+            hovertemplate="Date: %{x|%Y-%m-%d}<br>GI: %{y:+.3f}B<extra></extra>",
+        ))
 
     fig.add_hline(y=0, line_dash="dash", line_color="rgba(255,255,255,0.4)")
 
@@ -426,10 +597,25 @@ def plot_gamma_index_timeline(ticker: str) -> go.Figure:
         xaxis_title="Date",
         yaxis_title="Gamma Index ($B)",
         template="plotly_dark",
-        height=350,
+        height=400,
         legend=dict(orientation="h", y=1.05),
         yaxis=dict(zeroline=True, zerolinecolor="rgba(255,255,255,0.4)"),
     )
+
+    # Add annotation explaining proxy
+    if has_proxy and not has_real:
+        fig.add_annotation(
+            text="Proxy estimate from VIX/SPY data · Real data accumulates daily",
+            xref="paper", yref="paper", x=0.5, y=-0.12,
+            showarrow=False, font=dict(size=11, color="#8B9BBF"),
+        )
+    elif has_proxy and has_real:
+        fig.add_annotation(
+            text="Dotted line = VIX-derived proxy · Solid line = real GEX data",
+            xref="paper", yref="paper", x=0.5, y=-0.12,
+            showarrow=False, font=dict(size=11, color="#8B9BBF"),
+        )
+
     return fig
 
 
