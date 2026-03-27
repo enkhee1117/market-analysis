@@ -122,8 +122,12 @@ st.sidebar.markdown("---")
 st.sidebar.subheader("Global Settings")
 spy_ticker = st.sidebar.selectbox("Primary ETF", ["SPY", "QQQ", "IWM"], index=0)
 vix_period  = st.sidebar.selectbox("VIX History Period", ["1y", "2y", "3y", "5y"], index=1)
-gex_ticker  = st.sidebar.radio("GEX Ticker", ["SPY", "SPX"], index=0,
-                                help="SPX options = 10x multiplier vs SPY")
+_GEX_PRESETS = ["SPY", "SPX", "QQQ", "AAPL", "NVDA", "MU", "TSLA", "AMZN", "META", "MSFT", "AMD", "GOOGL"]
+_gex_preset = st.sidebar.selectbox("GEX Ticker", _GEX_PRESETS, index=0,
+                                    help="SPX options use 10× multiplier vs SPY")
+_gex_custom = st.sidebar.text_input("Or enter custom ticker", value="",
+                                     placeholder="e.g. COIN, SOFI, ARM")
+gex_ticker = _gex_custom.strip().upper() if _gex_custom.strip() else _gex_preset
 
 st.sidebar.markdown("---")
 
@@ -410,12 +414,15 @@ with tab2:
                 use_container_width=True, hide_index=True,
             )
 
-    # Gamma Index timeline (real data + historical proxy from VIX/SPY)
+    # Gamma Index timeline (real data + historical proxy)
+    # VIX-based proxy is only meaningful for SPY/SPX (broad market gamma)
     with st.spinner("Building Gamma Index timeline..."):
-        # Fetch VIX + SPY history for the proxy (reuses cached data)
-        _spy_hist_for_proxy = fetch_price_history("SPY", period="2y", interval="1d")
-        _vix_hist_for_proxy = fetch_price_history("^VIX", period="2y", interval="1d")
-        _proxy_df = compute_historical_gamma_proxy(_spy_hist_for_proxy, _vix_hist_for_proxy)
+        if gex_ticker in ("SPY", "SPX"):
+            _spy_hist_for_proxy = fetch_price_history("SPY", period="2y", interval="1d")
+            _vix_hist_for_proxy = fetch_price_history("^VIX", period="2y", interval="1d")
+            _proxy_df = compute_historical_gamma_proxy(_spy_hist_for_proxy, _vix_hist_for_proxy)
+        else:
+            _proxy_df = None  # No proxy for individual stocks
 
     fig_gi_timeline = plot_gamma_index_timeline(gex_ticker, proxy_df=_proxy_df)
     st.plotly_chart(fig_gi_timeline, use_container_width=True)
