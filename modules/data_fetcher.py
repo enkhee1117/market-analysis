@@ -19,9 +19,10 @@ TIMEFRAME_MAP = {
     "10 Years":  ("10y",  "1wk"),
 }
 
-# ── Daily file cache ─────────────────────────────────────────────────────────
-# Data is fetched from Yahoo Finance once per day and stored as parquet files.
-# Subsequent requests read from disk, eliminating rate-limit issues.
+# ── Daily two-layer cache ────────────────────────────────────────────────────
+# Layer 1: Local parquet files in cache/ (fast, ephemeral on Streamlit Cloud)
+# Layer 2: Supabase PostgreSQL (durable, survives redeploys)
+# On read: check file → Supabase → miss.  On write: file + Supabase.
 
 CACHE_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "cache")
 
@@ -32,30 +33,102 @@ def _cache_path(key: str, ext: str = "parquet") -> str:
     return os.path.join(CACHE_DIR, f"{key}_{date.today().isoformat()}.{ext}")
 
 
+def _supabase_table_for_key(key: str) -> str:
+    """Determine which Supabase table to use based on the cache key."""
+    return "price_cache" if "_price_" in key or "_multi_" in key else "options_cache"
+
+
 def _read_cache(key: str) -> pd.DataFrame | None:
-    """Read today's cached parquet file if it exists."""
+    """Read today's cached data. Tries local file first, then Supabase."""
+    # Layer 1: local file (fast)
     path = _cache_path(key)
     if os.path.exists(path):
         try:
             return pd.read_parquet(path)
         except Exception:
-            return None
+            pass
+
+    # Layer 2: Supabase (durable)
+    try:
+        from modules.supabase_cache import read_cache_remote
+        today = date.today().isoformat()
+        remote_key = f"{key}_{today}"
+        df = read_cache_remote(_supabase_table_for_key(key), remote_key)
+        if df is not None:
+            # Backfill local file for speed on next access
+            try:
+                os.makedirs(CACHE_DIR, exist_ok=True)
+                df.to_parquet(_cache_path(key))
+            except Exception:
+                pass
+            return df
+    except Exception:
+        pass
+
     return None
 
 
 def _write_cache(key: str, df: pd.DataFrame) -> None:
-    """Write DataFrame to today's cache file."""
+    """Write DataFrame to local file + Supabase."""
     if df.empty:
         return
+    # Layer 1: local file
     try:
         path = _cache_path(key)
         df.to_parquet(path)
     except Exception:
-        pass  # Cache write failure is non-fatal
+        pass
+
+    # Layer 2: Supabase (durable)
+    try:
+        from modules.supabase_cache import write_cache_remote
+        today = date.today().isoformat()
+        remote_key = f"{key}_{today}"
+        write_cache_remote(_supabase_table_for_key(key), remote_key, df, today)
+    except Exception:
+        pass
+
+
+def _read_spot_cache(spot_key: str) -> float | None:
+    """Read cached spot price from local JSON file, then Supabase."""
+    spot_path = _cache_path(spot_key, ext="json")
+    # Layer 1: local file
+    if os.path.exists(spot_path):
+        try:
+            with open(spot_path) as f:
+                return json.load(f).get("spot")
+        except Exception:
+            pass
+    # Layer 2: Supabase
+    try:
+        from modules.supabase_cache import read_spot_remote
+        today = date.today().isoformat()
+        return read_spot_remote(f"{spot_key}_{today}")
+    except Exception:
+        return None
+
+
+def _write_spot_cache(spot_key: str, spot: float) -> None:
+    """Write spot price to local JSON + Supabase."""
+    # Layer 1: local file
+    try:
+        spot_path = _cache_path(spot_key, ext="json")
+        os.makedirs(CACHE_DIR, exist_ok=True)
+        with open(spot_path, "w") as f:
+            json.dump({"spot": spot}, f)
+    except Exception:
+        pass
+    # Layer 2: Supabase
+    try:
+        from modules.supabase_cache import write_spot_remote
+        today = date.today().isoformat()
+        write_spot_remote(f"{spot_key}_{today}", spot, today)
+    except Exception:
+        pass
 
 
 def clear_today_cache():
-    """Delete all of today's cache files (used by Force Refresh button)."""
+    """Delete all of today's local cache files (used by Force Refresh button)."""
     if not os.path.exists(CACHE_DIR):
         return
     today = date.today().isoformat()
@@ -247,20 +320,14 @@ def fetch_options_chain_massive(ticker: str):
     - Exponential backoff on 429 / 5xx
     - 5-min circuit-breaker cooldown after repeated 429s
     """
-    # Check file cache first
+    # Check cache (file → Supabase)
     calls_cache_key = f"{ticker}_massive_calls"
     puts_cache_key = f"{ticker}_massive_puts"
-    spot_path = _cache_path(f"{ticker}_massive_spot", ext="json")
+    spot_cache_key = f"{ticker}_massive_spot"
 
     cached_calls = _read_cache(calls_cache_key)
     cached_puts = _read_cache(puts_cache_key)
-    cached_spot = None
-    if os.path.exists(spot_path):
-        try:
-            with open(spot_path) as f:
-                cached_spot = json.load(f).get("spot")
-        except Exception:
-            pass
+    cached_spot = _read_spot_cache(spot_cache_key)
 
     if cached_calls is not None and cached_puts is not None and cached_spot is not None:
         return cached_calls, cached_puts, cached_spot
@@ -339,16 +406,11 @@ def fetch_options_chain_massive(ticker: str):
     calls_df = pd.DataFrame(calls_rows) if calls_rows else pd.DataFrame()
     puts_df = pd.DataFrame(puts_rows) if puts_rows else pd.DataFrame()
 
-    # Write to cache
+    # Write to cache (file + Supabase)
     _write_cache(calls_cache_key, calls_df)
     _write_cache(puts_cache_key, puts_df)
     if spot is not None:
-        try:
-            os.makedirs(CACHE_DIR, exist_ok=True)
-            with open(spot_path, "w") as f:
-                json.dump({"spot": spot}, f)
-        except Exception:
-            pass
+        _write_spot_cache(spot_cache_key, spot)
 
     return calls_df, puts_df, spot
 
@@ -376,17 +438,11 @@ def _fetch_options_chain_yfinance(ticker: str):
     """Fetch options chain from Yahoo Finance (fallback)."""
     calls_cache_key = f"{ticker}_yf_options_calls"
     puts_cache_key = f"{ticker}_yf_options_puts"
-    spot_path = _cache_path(f"{ticker}_yf_options_spot", ext="json")
+    spot_cache_key = f"{ticker}_yf_options_spot"
 
     cached_calls = _read_cache(calls_cache_key)
     cached_puts = _read_cache(puts_cache_key)
-    cached_spot = None
-    if os.path.exists(spot_path):
-        try:
-            with open(spot_path) as f:
-                cached_spot = json.load(f).get("spot")
-        except Exception:
-            pass
+    cached_spot = _read_spot_cache(spot_cache_key)
 
     if cached_calls is not None and cached_puts is not None and cached_spot is not None:
         return cached_calls, cached_puts, cached_spot
@@ -433,11 +489,6 @@ def _fetch_options_chain_yfinance(ticker: str):
     _write_cache(calls_cache_key, calls_df)
     _write_cache(puts_cache_key, puts_df)
     if spot is not None:
-        try:
-            os.makedirs(CACHE_DIR, exist_ok=True)
-            with open(spot_path, "w") as f:
-                json.dump({"spot": spot}, f)
-        except Exception:
-            pass
+        _write_spot_cache(spot_cache_key, spot)
 
     return calls_df, puts_df, spot

@@ -281,7 +281,7 @@ def _save_gi_history(history: list[dict]) -> None:
 
 def save_gamma_index_snapshot(ticker: str, gamma_idx: dict, spot: float) -> None:
     """
-    Append today's gamma-index snapshot to the history file.
+    Append today's gamma-index snapshot to the history file + Supabase.
 
     One entry per (ticker, date) pair — overwrites if already present today.
     """
@@ -301,24 +301,49 @@ def save_gamma_index_snapshot(ticker: str, gamma_idx: dict, spot: float) -> None
         "gamma_concentration": gamma_idx.get("gamma_concentration"),
     }
 
+    # Layer 1: local file
     history = _load_gi_history()
-    # Replace today's entry for this ticker if it exists
     history = [h for h in history if not (h.get("date") == today and h.get("ticker") == ticker)]
     history.append(entry)
-    # Keep last 365 days
     history.sort(key=lambda x: x.get("date", ""))
     history = history[-365:]
     _save_gi_history(history)
+
+    # Layer 2: Supabase (durable)
+    try:
+        from modules.supabase_cache import save_gamma_snapshot_remote
+        save_gamma_snapshot_remote(ticker, entry)
+    except Exception:
+        pass
 
 
 def load_gamma_index_history(ticker: str) -> pd.DataFrame:
     """
     Return a DataFrame of historical gamma-index snapshots for a ticker.
 
-    Columns: date, spot, gamma_index, call_wall, put_wall, gamma_flip, etc.
+    Tries local file first; falls back to Supabase if local is empty.
     """
+    # Layer 1: local file
     history = _load_gi_history()
     rows = [h for h in history if h.get("ticker") == ticker]
+
+    # Layer 2: Supabase fallback if local is empty
+    if not rows:
+        try:
+            from modules.supabase_cache import load_gamma_history_remote
+            remote = load_gamma_history_remote(ticker)
+            if remote:
+                rows = remote
+                # Backfill local file with remote data
+                merged = history + [r for r in remote
+                                    if not any(h.get("date") == r.get("date")
+                                               and h.get("ticker") == r.get("ticker")
+                                               for h in history)]
+                merged.sort(key=lambda x: x.get("date", ""))
+                _save_gi_history(merged[-365:])
+        except Exception:
+            pass
+
     if not rows:
         return pd.DataFrame()
     df = pd.DataFrame(rows)
