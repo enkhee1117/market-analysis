@@ -16,6 +16,7 @@ from modules.data_fetcher import (
     fetch_price_history,
     fetch_multi_tickers,
     fetch_options_chain,
+    clear_today_cache,
     TIMEFRAME_MAP,
 )
 from modules.day_of_week import (
@@ -116,7 +117,11 @@ gex_ticker  = st.sidebar.radio("GEX Ticker", ["SPY", "SPX"], index=0,
                                 help="SPX options = 10x multiplier vs SPY")
 
 st.sidebar.markdown("---")
-st.sidebar.caption("Data via Yahoo Finance · Refreshes every 5 min")
+if st.sidebar.button("Force Refresh Data"):
+    clear_today_cache()
+    st.cache_data.clear()
+    st.rerun()
+st.sidebar.caption("Data via Yahoo Finance · Cached daily")
 st.sidebar.caption("GEX assumes MM short calls, long puts")
 
 
