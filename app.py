@@ -11,6 +11,7 @@ Market Analysis Dashboard
 import streamlit as st
 import pandas as pd
 import numpy as np
+from datetime import date
 
 from modules.data_fetcher import (
     fetch_price_history,
@@ -42,6 +43,8 @@ from modules.gamma_exposure import (
     compute_gamma_index,
     compute_historical_gamma_proxy,
     save_gamma_index_snapshot,
+    load_gamma_index_history,
+    plot_price_with_gex_levels,
     plot_gex_profile,
     plot_gex_by_expiration,
     plot_gamma_index_timeline,
@@ -428,6 +431,17 @@ def _render_gex_tab():
                 use_container_width=True, hide_index=True,
             )
 
+    # ── Price chart with GEX levels ──────────────────────────────────────
+    # Use the underlying ticker for price data (SPX → ^GSPC)
+    _price_ticker = "^GSPC" if gex_ticker == "SPX" else gex_ticker
+    _price_hist = fetch_price_history(_price_ticker, period="1mo", interval="1d")
+    fig_price = plot_price_with_gex_levels(
+        _price_hist, spot, gex_ticker,
+        call_wall=cw, put_wall=pw, gamma_flip=flip,
+        top_strikes=top_strikes,
+    )
+    st.plotly_chart(fig_price, use_container_width=True)
+
     # Gamma Index timeline
     with st.spinner("Building Gamma Index timeline..."):
         if gex_ticker in ("SPY", "SPX"):
@@ -451,18 +465,20 @@ def _render_gex_tab():
     fig_exp = plot_gex_by_expiration(calls_df, puts_df, spot, gex_ticker)
     st.plotly_chart(fig_exp, use_container_width=True)
 
+    # ── Raw GEX data + export ────────────────────────────────────────────
+    lo = spot * (1 - strike_range / 100)
+    hi = spot * (1 + strike_range / 100)
+    sub_gex = gex_df[(gex_df["strike"] >= lo) & (gex_df["strike"] <= hi)].copy()
+    sub_gex_disp = sub_gex[["strike", "call_gex_b", "put_gex_b", "net_gex_b"]].rename(
+        columns={
+            "strike": "Strike",
+            "call_gex_b": "Call GEX ($B)",
+            "put_gex_b":  "Put GEX ($B)",
+            "net_gex_b":  "Net GEX ($B)",
+        }
+    )
+
     with st.expander("Raw GEX Data Table"):
-        lo = spot * (1 - strike_range / 100)
-        hi = spot * (1 + strike_range / 100)
-        sub_gex = gex_df[(gex_df["strike"] >= lo) & (gex_df["strike"] <= hi)].copy()
-        sub_gex_disp = sub_gex[["strike", "call_gex_b", "put_gex_b", "net_gex_b"]].rename(
-            columns={
-                "strike": "Strike",
-                "call_gex_b": "Call GEX ($B)",
-                "put_gex_b":  "Put GEX ($B)",
-                "net_gex_b":  "Net GEX ($B)",
-            }
-        )
         def _gex_color(v):
             try:
                 f = float(v)
@@ -476,6 +492,49 @@ def _render_gex_tab():
                 "Net GEX ($B)":  "{:.4f}",
             }).map(_gex_color, subset=["Net GEX ($B)"]),
             use_container_width=True, hide_index=True,
+        )
+
+    # ── Export buttons ────────────────────────────────────────────────────
+    st.markdown("---")
+    st.subheader("Export Data")
+    exp_cols = st.columns(3)
+    with exp_cols[0]:
+        _gex_csv = sub_gex_disp.to_csv(index=False)
+        st.download_button(
+            "Download GEX Data (CSV)",
+            data=_gex_csv,
+            file_name=f"{gex_ticker}_gex_{date.today().isoformat()}.csv",
+            mime="text/csv",
+        )
+    with exp_cols[1]:
+        _gi_hist = load_gamma_index_history(gex_ticker)
+        if not _gi_hist.empty:
+            _gi_csv = _gi_hist.to_csv(index=False)
+            st.download_button(
+                "Download Gamma Index History (CSV)",
+                data=_gi_csv,
+                file_name=f"{gex_ticker}_gamma_index_history.csv",
+                mime="text/csv",
+            )
+        else:
+            st.button("Download Gamma Index History (CSV)", disabled=True,
+                       help="No history data yet")
+    with exp_cols[2]:
+        # Full GEX data (not filtered by strike range)
+        _full_gex_disp = gex_df[["strike", "call_gex_b", "put_gex_b", "net_gex_b"]].rename(
+            columns={
+                "strike": "Strike",
+                "call_gex_b": "Call GEX ($B)",
+                "put_gex_b":  "Put GEX ($B)",
+                "net_gex_b":  "Net GEX ($B)",
+            }
+        )
+        _full_csv = _full_gex_disp.to_csv(index=False)
+        st.download_button(
+            "Download Full GEX (All Strikes)",
+            data=_full_csv,
+            file_name=f"{gex_ticker}_gex_full_{date.today().isoformat()}.csv",
+            mime="text/csv",
         )
 
 with tab2:

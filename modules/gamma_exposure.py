@@ -623,6 +623,117 @@ def plot_gamma_index_timeline(ticker: str, proxy_df: pd.DataFrame | None = None)
 
 # ── Charts ────────────────────────────────────────────────────────────────────
 
+def plot_price_with_gex_levels(
+    price_df: pd.DataFrame,
+    spot: float,
+    ticker: str,
+    call_wall: float | None = None,
+    put_wall: float | None = None,
+    gamma_flip: float | None = None,
+    top_strikes: list | None = None,
+) -> go.Figure:
+    """
+    Candlestick chart of recent price action with GEX key levels overlaid
+    as horizontal lines: call wall (resistance), put wall (support),
+    gamma flip (regime boundary).
+    """
+    fig = go.Figure()
+
+    if price_df is None or price_df.empty:
+        fig.update_layout(
+            title=f"{ticker} — No price data available",
+            template="plotly_dark", height=400,
+        )
+        return fig
+
+    df = price_df.copy()
+    df.index = pd.to_datetime(df.index)
+
+    # Use last 15 trading days
+    df = df.tail(15)
+
+    has_ohlc = all(c in df.columns for c in ["Open", "High", "Low", "Close"])
+
+    if has_ohlc:
+        fig.add_trace(go.Candlestick(
+            x=df.index,
+            open=df["Open"], high=df["High"],
+            low=df["Low"], close=df["Close"],
+            name="Price",
+            increasing_line_color="#5FC97B",
+            decreasing_line_color="#E85C5C",
+        ))
+    else:
+        fig.add_trace(go.Scatter(
+            x=df.index, y=df["Close"],
+            mode="lines", name="Close",
+            line=dict(color="#F5E642", width=2),
+        ))
+
+    # Determine y-axis range from price data
+    if has_ohlc:
+        y_min = df["Low"].min()
+        y_max = df["High"].max()
+    else:
+        y_min = df["Close"].min()
+        y_max = df["Close"].max()
+
+    # Extend range to include GEX levels if they fall outside price range
+    levels = [v for v in [call_wall, put_wall, gamma_flip] if v is not None]
+    if levels:
+        y_min = min(y_min, min(levels)) * 0.998
+        y_max = max(y_max, max(levels)) * 1.002
+
+    # ── GEX levels as horizontal lines ──
+    if call_wall is not None:
+        fig.add_hline(
+            y=call_wall, line_dash="solid", line_color="#4C9BE8", line_width=2,
+            annotation_text=f"Call Wall ${call_wall:,.0f}",
+            annotation_position="right",
+            annotation_font=dict(color="#4C9BE8", size=11),
+        )
+
+    if put_wall is not None:
+        fig.add_hline(
+            y=put_wall, line_dash="solid", line_color="#E85C5C", line_width=2,
+            annotation_text=f"Put Wall ${put_wall:,.0f}",
+            annotation_position="right",
+            annotation_font=dict(color="#E85C5C", size=11),
+        )
+
+    if gamma_flip is not None:
+        fig.add_hline(
+            y=gamma_flip, line_dash="dash", line_color="#F28C38", line_width=2,
+            annotation_text=f"Gamma Flip ${gamma_flip:,.0f}",
+            annotation_position="right",
+            annotation_font=dict(color="#F28C38", size=11),
+        )
+
+    # Top strikes as subtle dotted lines (skip if too close to walls/flip)
+    if top_strikes:
+        existing = {call_wall, put_wall, gamma_flip}
+        for ts in top_strikes[:3]:
+            strike = ts.get("strike")
+            if strike and strike not in existing and y_min <= strike <= y_max:
+                fig.add_hline(
+                    y=strike, line_dash="dot",
+                    line_color="rgba(180,180,180,0.35)", line_width=1,
+                )
+
+    fig.update_layout(
+        title=f"{ticker} Price + GEX Key Levels (15d)",
+        template="plotly_dark",
+        height=400,
+        xaxis_rangeslider_visible=False,
+        yaxis=dict(
+            title="Price",
+            range=[y_min, y_max],
+        ),
+        legend=dict(orientation="h", y=1.05),
+    )
+    return fig
+
+
 def plot_gex_profile(gex_df: pd.DataFrame, spot: float, ticker: str,
                      strike_range_pct: float = 0.10,
                      view_mode: str = "Call / Put") -> go.Figure:

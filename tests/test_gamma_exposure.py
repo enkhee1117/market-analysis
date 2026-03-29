@@ -812,6 +812,46 @@ def test_calibrate_proxy_scales_to_real():
     assert abs(result["gamma_proxy"].iloc[0]) < 3.0  # rough check
 
 
+from modules.gamma_exposure import plot_price_with_gex_levels
+
+
+def test_price_chart_with_levels():
+    """Price chart with GEX levels should return a valid Figure."""
+    dates = pd.bdate_range("2026-03-10", periods=15)
+    price_df = pd.DataFrame({
+        "Open": np.linspace(550, 560, 15),
+        "High": np.linspace(552, 562, 15),
+        "Low": np.linspace(548, 558, 15),
+        "Close": np.linspace(551, 561, 15),
+    }, index=dates)
+    fig = plot_price_with_gex_levels(
+        price_df, spot=560.0, ticker="SPY",
+        call_wall=570.0, put_wall=545.0, gamma_flip=555.0,
+        top_strikes=[{"strike": 565.0, "net_gex_b": 0.5}],
+    )
+    assert isinstance(fig, go.Figure)
+    # Should have candlestick trace
+    assert any("Candlestick" in str(type(t)) for t in fig.data)
+
+
+def test_price_chart_empty_data():
+    """Should handle empty price data gracefully."""
+    fig = plot_price_with_gex_levels(
+        pd.DataFrame(), spot=400.0, ticker="TEST",
+    )
+    assert isinstance(fig, go.Figure)
+
+
+def test_price_chart_close_only():
+    """Should fall back to line chart if no OHLC columns."""
+    dates = pd.bdate_range("2026-03-10", periods=10)
+    price_df = pd.DataFrame({"Close": np.linspace(100, 110, 10)}, index=dates)
+    fig = plot_price_with_gex_levels(price_df, spot=110.0, ticker="MU")
+    assert isinstance(fig, go.Figure)
+    # Should have scatter trace, not candlestick
+    assert any(isinstance(t, go.Scatter) for t in fig.data)
+
+
 def test_calibrate_no_overlap():
     """Calibration without overlap should normalize to ~0.5B std."""
     proxy = pd.DataFrame({
