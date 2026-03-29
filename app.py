@@ -42,12 +42,17 @@ from modules.gamma_exposure import (
     total_gex_metrics,
     compute_gamma_index,
     compute_historical_gamma_proxy,
+    compute_dex,
+    total_dex_metrics,
+    compute_iv_skew,
     save_gamma_index_snapshot,
     load_gamma_index_history,
     plot_price_with_gex_levels,
     plot_gex_profile,
     plot_gex_by_expiration,
     plot_gamma_index_timeline,
+    plot_dex_profile,
+    plot_iv_skew,
 )
 from modules.vix_analysis import (
     compute_vix_metrics,
@@ -464,6 +469,46 @@ def _render_gex_tab():
     st.subheader("GEX by Expiration")
     fig_exp = plot_gex_by_expiration(calls_df, puts_df, spot, gex_ticker)
     st.plotly_chart(fig_exp, use_container_width=True)
+
+    st.markdown("---")
+
+    # ── DEX + IV Skew side by side ────────────────────────────────────────
+    col_dex, col_iv = st.columns(2)
+
+    with col_dex:
+        st.subheader("Delta Exposure (DEX)")
+        with st.spinner("Computing DEX..."):
+            dex_df = compute_dex(calls_df, puts_df, spot)
+        if not dex_df.empty:
+            dex_metrics = total_dex_metrics(dex_df)
+            net_dex = dex_metrics.get("total_net_dex_m", 0)
+            dex_label = "Dealers sell shares" if net_dex > 0 else "Dealers buy shares"
+            colored_metric("Net Delta Exposure", f"{net_dex:+.1f}M shares",
+                           sub=dex_label)
+            fig_dex = plot_dex_profile(dex_df, spot, gex_ticker,
+                                       strike_range_pct=strike_range / 100)
+            st.plotly_chart(fig_dex, use_container_width=True)
+        else:
+            st.info("DEX data unavailable — delta could not be computed.")
+
+    with col_iv:
+        st.subheader("IV Skew")
+        with st.spinner("Computing IV skew..."):
+            iv_df = compute_iv_skew(calls_df, puts_df, spot)
+        if not iv_df.empty:
+            # Show ATM IV and skew summary
+            atm_mask = (iv_df["moneyness"] >= 0.98) & (iv_df["moneyness"] <= 1.02)
+            atm_data = iv_df[atm_mask]
+            if not atm_data.empty and "call_iv" in atm_data.columns:
+                atm_iv = atm_data["call_iv"].mean() * 100
+                colored_metric("ATM Implied Vol", f"{atm_iv:.1f}%", sub="Near-money average")
+            fig_iv = plot_iv_skew(iv_df, spot, gex_ticker,
+                                  strike_range_pct=strike_range / 100)
+            st.plotly_chart(fig_iv, use_container_width=True)
+        else:
+            st.info("IV skew data unavailable.")
+
+    st.markdown("---")
 
     # ── Raw GEX data + export ────────────────────────────────────────────
     lo = spot * (1 - strike_range / 100)

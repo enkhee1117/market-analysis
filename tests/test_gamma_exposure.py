@@ -861,3 +861,154 @@ def test_calibrate_no_overlap():
     real = pd.DataFrame()  # no real data
     result = calibrate_proxy_to_real(proxy, real)
     assert abs(result["gamma_proxy"].std() - 0.5) < 0.1
+
+
+# ── Black-Scholes Delta ──────────────────────────────────────────────────────
+
+from modules.gamma_exposure import _bs_delta
+
+
+def test_bs_delta_call_atm_near_half():
+    """ATM call delta should be near 0.5."""
+    d = _bs_delta(400, 400, 0.25, 0.05, 0.20, "call")
+    assert 0.4 < d < 0.7
+
+
+def test_bs_delta_put_atm_near_neg_half():
+    """ATM put delta should be near -0.5."""
+    d = _bs_delta(400, 400, 0.25, 0.05, 0.20, "put")
+    assert -0.7 < d < -0.4
+
+
+def test_bs_delta_call_deep_itm_near_one():
+    """Deep ITM call delta → ~1."""
+    d = _bs_delta(400, 200, 0.25, 0.05, 0.20, "call")
+    assert d > 0.95
+
+
+def test_bs_delta_put_deep_itm_near_neg_one():
+    """Deep ITM put delta → ~-1."""
+    d = _bs_delta(400, 600, 0.25, 0.05, 0.20, "put")
+    assert d < -0.95
+
+
+def test_bs_delta_invalid_inputs():
+    assert _bs_delta(0, 400, 0.25, 0.05, 0.20) == 0.0
+    assert _bs_delta(400, 400, 0, 0.05, 0.20) == 0.0
+    assert _bs_delta(400, 400, 0.25, 0.05, 0) == 0.0
+
+
+# ── Delta Exposure (DEX) ─────────────────────────────────────────────────────
+
+from modules.gamma_exposure import compute_dex, total_dex_metrics
+
+
+def test_compute_dex_returns_expected_columns(options_dfs):
+    calls, puts, spot = options_dfs
+    dex = compute_dex(calls, puts, spot)
+    expected = {"strike", "call_dex", "put_dex", "net_dex",
+                "call_dex_m", "put_dex_m", "net_dex_m"}
+    assert expected == set(dex.columns)
+
+
+def test_compute_dex_call_dex_negative():
+    """Dealers short calls → call DEX should be negative (dealers short positive delta)."""
+    spot = 400.0
+    # Use explicit delta values to avoid B-S TTE issues with past dates
+    calls = pd.DataFrame({
+        "strike": [390.0, 400.0, 410.0],
+        "delta": [0.7, 0.5, 0.3],
+        "openInterest": [1000.0, 2000.0, 1000.0],
+    })
+    dex = compute_dex(calls, pd.DataFrame(), spot)
+    assert not dex.empty
+    # Dealer short calls: DEX = -delta * OI * 100, all negative
+    assert dex["call_dex"].sum() < 0
+
+
+def test_compute_dex_put_dex_positive():
+    """Dealers long puts → put DEX should be positive (dealers long negative delta → sell stock)."""
+    spot = 400.0
+    puts = pd.DataFrame({
+        "strike": [390.0, 400.0, 410.0],
+        "delta": [-0.3, -0.5, -0.7],
+        "openInterest": [1000.0, 2000.0, 1000.0],
+    })
+    dex = compute_dex(pd.DataFrame(), puts, spot)
+    assert not dex.empty
+    # Dealer long puts: DEX = -put_delta * OI * 100 → positive (since put_delta < 0)
+    assert dex["put_dex"].sum() > 0
+
+
+def test_compute_dex_empty():
+    dex = compute_dex(pd.DataFrame(), pd.DataFrame(), 400.0)
+    assert dex.empty
+
+
+def test_total_dex_metrics(options_dfs):
+    calls, puts, spot = options_dfs
+    dex = compute_dex(calls, puts, spot)
+    m = total_dex_metrics(dex)
+    assert "total_net_dex_m" in m
+    np.testing.assert_allclose(
+        m["total_net_dex_m"],
+        m["total_call_dex_m"] + m["total_put_dex_m"],
+        atol=0.01,
+    )
+
+
+# ── IV Skew ──────────────────────────────────────────────────────────────────
+
+from modules.gamma_exposure import compute_iv_skew
+
+
+def test_iv_skew_returns_expected_columns(options_dfs):
+    calls, puts, spot = options_dfs
+    iv = compute_iv_skew(calls, puts, spot)
+    if not iv.empty:
+        assert "strike" in iv.columns
+        assert "moneyness" in iv.columns
+
+
+def test_iv_skew_moneyness_at_spot(options_dfs):
+    """Moneyness should be ~1.0 at spot price."""
+    calls, puts, spot = options_dfs
+    iv = compute_iv_skew(calls, puts, spot)
+    if not iv.empty:
+        atm = iv[(iv["moneyness"] >= 0.99) & (iv["moneyness"] <= 1.01)]
+        if not atm.empty:
+            assert abs(atm["moneyness"].mean() - 1.0) < 0.02
+
+
+def test_iv_skew_empty():
+    iv = compute_iv_skew(pd.DataFrame(), pd.DataFrame(), 400.0)
+    assert iv.empty
+
+
+# ── DEX + IV Skew Chart Functions ────────────────────────────────────────────
+
+from modules.gamma_exposure import plot_dex_profile, plot_iv_skew
+
+
+def test_plot_dex_profile_returns_figure(options_dfs):
+    calls, puts, spot = options_dfs
+    dex = compute_dex(calls, puts, spot)
+    fig = plot_dex_profile(dex, spot, "SPY")
+    assert isinstance(fig, go.Figure)
+
+
+def test_plot_dex_profile_empty():
+    fig = plot_dex_profile(pd.DataFrame(), 400.0, "SPY")
+    assert isinstance(fig, go.Figure)
+
+
+def test_plot_iv_skew_returns_figure(options_dfs):
+    calls, puts, spot = options_dfs
+    iv = compute_iv_skew(calls, puts, spot)
+    fig = plot_iv_skew(iv, spot, "SPY")
+    assert isinstance(fig, go.Figure)
+
+
+def test_plot_iv_skew_empty():
+    fig = plot_iv_skew(pd.DataFrame(), 400.0, "SPY")
+    assert isinstance(fig, go.Figure)

@@ -50,6 +50,209 @@ def _add_computed_gamma(df: pd.DataFrame, spot: float, r: float = 0.05) -> pd.Da
     return df
 
 
+# ── Black-Scholes Delta ──────────────────────────────────────────────────────
+
+def _bs_delta(S: float, K: float, T: float, r: float, sigma: float,
+              option_type: str = "call") -> float:
+    """Black-Scholes delta for a European option."""
+    if T <= 0 or sigma <= 0 or S <= 0 or K <= 0:
+        return 0.0
+    d1 = (np.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * np.sqrt(T))
+    if option_type == "call":
+        return float(norm.cdf(d1))
+    else:
+        return float(norm.cdf(d1) - 1)
+
+
+def _add_computed_delta(df: pd.DataFrame, spot: float, option_type: str = "call",
+                        r: float = 0.05) -> pd.DataFrame:
+    """Compute Black-Scholes delta from IV + expiration if delta column missing."""
+    df = df.copy()
+    cols_lower = {c.lower(): c for c in df.columns}
+
+    # Determine TTE
+    today = datetime.now().date()
+    exp_col = cols_lower.get("expiration")
+    if exp_col and exp_col in df.columns:
+        def _tte(exp_str):
+            try:
+                exp = datetime.strptime(str(exp_str), "%Y-%m-%d").date()
+                return max((exp - today).days, 0) / 365.0
+            except Exception:
+                return 0.0
+        df["_T"] = df[exp_col].apply(_tte)
+    else:
+        df["_T"] = 30 / 365.0
+
+    iv_col = cols_lower.get("impliedvolatility")
+    strike_col = cols_lower.get("strike")
+    if iv_col and strike_col:
+        df["delta"] = df.apply(
+            lambda row: _bs_delta(spot, row[strike_col], row["_T"], r,
+                                  row[iv_col], option_type)
+            if row[iv_col] > 0 else 0.0,
+            axis=1,
+        )
+    df.drop(columns=["_T"], inplace=True, errors="ignore")
+    return df
+
+
+# ── Delta Exposure (DEX) ────────────────────────────────────────────────────
+
+def compute_dex(calls_df: pd.DataFrame, puts_df: pd.DataFrame,
+                spot: float) -> pd.DataFrame:
+    """
+    Compute dealer Delta Exposure (DEX) per strike.
+
+    Convention (same dealer short-call / long-put assumption as GEX):
+      - Dealers SHORT calls → dealer delta = -call_delta × OI × 100
+      - Dealers LONG puts   → dealer delta = -put_delta × OI × 100
+        (put delta is already negative, so this becomes positive)
+
+    Positive net DEX → dealers need to sell shares to hedge (bearish pressure)
+    Negative net DEX → dealers need to buy shares to hedge (bullish pressure)
+
+    Returns DataFrame with columns: strike, call_dex, put_dex, net_dex,
+    call_dex_m, put_dex_m, net_dex_m (millions of shares equivalent).
+    """
+    if spot is None or spot == 0:
+        return pd.DataFrame()
+
+    def _prep(df, side):
+        if df is None or df.empty:
+            return pd.DataFrame()
+        d = df.copy()
+        d.columns = [c.lower() for c in d.columns]
+
+        # Compute delta from B-S if not present
+        if "delta" not in d.columns or d["delta"].isna().all() or (d["delta"] == 0).all():
+            d = _add_computed_delta(d, spot, option_type=side)
+
+        if "openinterest" not in d.columns:
+            return pd.DataFrame()
+        d = d.rename(columns={"openinterest": "openInterest"})
+
+        needed = ["strike", "delta", "openInterest"]
+        missing = [c for c in needed if c not in d.columns]
+        if missing:
+            return pd.DataFrame()
+
+        d = d[needed].dropna()
+        d = d[d["openInterest"] > 0]
+        d["side"] = side
+        return d
+
+    calls = _prep(calls_df, "call")
+    puts = _prep(puts_df, "put")
+
+    rows = []
+    for _, row in calls.iterrows():
+        # Dealers are short calls → dealer delta = -delta × OI × 100
+        dex = -row["delta"] * row["openInterest"] * 100
+        rows.append({"strike": row["strike"], "call_dex": dex, "put_dex": 0.0})
+
+    for _, row in puts.iterrows():
+        # Dealers are long puts → dealer delta = -put_delta × OI × 100
+        # put_delta is negative, so this is positive (dealers buy stock to hedge)
+        dex = -row["delta"] * row["openInterest"] * 100
+        rows.append({"strike": row["strike"], "call_dex": 0.0, "put_dex": dex})
+
+    if not rows:
+        return pd.DataFrame()
+
+    df = pd.DataFrame(rows)
+    dex = df.groupby("strike")[["call_dex", "put_dex"]].sum().reset_index()
+    dex["net_dex"] = dex["call_dex"] + dex["put_dex"]
+
+    # Scale to millions of shares
+    scale = 1e6
+    dex["call_dex_m"] = dex["call_dex"] / scale
+    dex["put_dex_m"] = dex["put_dex"] / scale
+    dex["net_dex_m"] = dex["net_dex"] / scale
+
+    return dex.sort_values("strike").reset_index(drop=True)
+
+
+def total_dex_metrics(dex_df: pd.DataFrame) -> dict:
+    """Summary metrics for DEX."""
+    if dex_df.empty:
+        return {}
+    return {
+        "total_net_dex_m": round(float(dex_df["net_dex_m"].sum()), 2),
+        "total_call_dex_m": round(float(dex_df["call_dex_m"].sum()), 2),
+        "total_put_dex_m": round(float(dex_df["put_dex_m"].sum()), 2),
+    }
+
+
+# ── IV Skew ─────────────────────────────────────────────────────────────────
+
+def compute_iv_skew(calls_df: pd.DataFrame, puts_df: pd.DataFrame,
+                    spot: float) -> pd.DataFrame:
+    """
+    Compute IV skew data for calls and puts, organized by strike.
+
+    Returns DataFrame with columns:
+      strike, call_iv, put_iv, moneyness (strike/spot ratio),
+      iv_skew (put_iv - call_iv at same strike).
+    """
+    if spot is None or spot == 0:
+        return pd.DataFrame()
+
+    def _prep_iv(df):
+        if df is None or df.empty:
+            return pd.DataFrame()
+        d = df.copy()
+        d.columns = [c.lower() for c in d.columns]
+        iv_col = "impliedvolatility"
+        if iv_col not in d.columns or "strike" not in d.columns:
+            return pd.DataFrame()
+        # Use nearest expiration only (most liquid, cleanest skew)
+        if "expiration" in d.columns:
+            nearest_exp = sorted(d["expiration"].unique())
+            # Use 2nd expiration if 1st is 0-1 DTE (often has IV artifacts)
+            today_str = datetime.now().date().isoformat()
+            valid_exps = [e for e in nearest_exp if e > today_str]
+            if len(valid_exps) >= 2:
+                exp = valid_exps[1]  # 2nd nearest
+            elif valid_exps:
+                exp = valid_exps[0]
+            else:
+                return pd.DataFrame()
+            d = d[d["expiration"] == exp]
+
+        d = d[["strike", iv_col]].dropna()
+        d = d[d[iv_col] > 0.001]  # filter out zero/garbage IV
+        # Average if multiple rows per strike
+        d = d.groupby("strike")[iv_col].mean().reset_index()
+        return d
+
+    call_iv = _prep_iv(calls_df)
+    put_iv = _prep_iv(puts_df)
+
+    if call_iv.empty and put_iv.empty:
+        return pd.DataFrame()
+
+    # Merge on strike
+    if not call_iv.empty:
+        call_iv = call_iv.rename(columns={"impliedvolatility": "call_iv"})
+    if not put_iv.empty:
+        put_iv = put_iv.rename(columns={"impliedvolatility": "put_iv"})
+
+    if not call_iv.empty and not put_iv.empty:
+        merged = pd.merge(call_iv, put_iv, on="strike", how="outer")
+    elif not call_iv.empty:
+        merged = call_iv.copy()
+        merged["put_iv"] = np.nan
+    else:
+        merged = put_iv.copy()
+        merged["call_iv"] = np.nan
+
+    merged["moneyness"] = merged["strike"] / spot
+    merged["iv_skew"] = merged.get("put_iv", 0) - merged.get("call_iv", 0)
+    merged = merged.sort_values("strike").reset_index(drop=True)
+    return merged
+
+
 # ── GEX Calculation ──────────────────────────────────────────────────────────
 
 def compute_gex(calls_df: pd.DataFrame, puts_df: pd.DataFrame, spot: float) -> pd.DataFrame:
@@ -891,4 +1094,148 @@ def plot_gex_by_expiration(calls_df: pd.DataFrame, puts_df: pd.DataFrame,
         legend=dict(orientation="h", y=1.05),
         yaxis=dict(zeroline=True, zerolinecolor="rgba(255,255,255,0.4)"),
     )
+    return fig
+
+
+def plot_dex_profile(dex_df: pd.DataFrame, spot: float, ticker: str,
+                     strike_range_pct: float = 0.10) -> go.Figure:
+    """
+    Bar chart of dealer Delta Exposure (DEX) per strike.
+
+    Positive net DEX = dealers need to sell shares (bearish hedge pressure).
+    Negative net DEX = dealers need to buy shares (bullish hedge pressure).
+    """
+    if dex_df.empty:
+        fig = go.Figure()
+        fig.update_layout(title=f"No DEX data for {ticker}", template="plotly_dark")
+        return fig
+
+    lo = spot * (1 - strike_range_pct)
+    hi = spot * (1 + strike_range_pct)
+    sub = dex_df[(dex_df["strike"] >= lo) & (dex_df["strike"] <= hi)].copy()
+    if sub.empty:
+        sub = dex_df.copy()
+
+    fig = go.Figure()
+
+    # Call DEX bars
+    fig.add_trace(go.Bar(
+        x=sub["strike"], y=sub["call_dex_m"],
+        name="Call DEX", marker_color="#4C9BE8", opacity=0.8,
+        hovertemplate="Strike: %{x}<br>Call DEX: %{y:.2f}M shares<extra></extra>",
+    ))
+    # Put DEX bars
+    fig.add_trace(go.Bar(
+        x=sub["strike"], y=sub["put_dex_m"],
+        name="Put DEX", marker_color="#E85C5C", opacity=0.8,
+        hovertemplate="Strike: %{x}<br>Put DEX: %{y:.2f}M shares<extra></extra>",
+    ))
+    # Net DEX line
+    fig.add_trace(go.Scatter(
+        x=sub["strike"], y=sub["net_dex_m"],
+        name="Net DEX", mode="lines",
+        line=dict(color="#F5E642", width=2),
+        hovertemplate="Strike: %{x}<br>Net DEX: %{y:.2f}M shares<extra></extra>",
+    ))
+
+    fig.add_vline(
+        x=spot, line_dash="dash", line_color="white", line_width=2,
+        annotation_text=f"Spot: {spot:.2f}",
+        annotation_position="top right", annotation_font_color="white",
+    )
+
+    fig.add_hline(y=0, line_dash="dash", line_color="rgba(255,255,255,0.3)")
+
+    fig.update_layout(
+        barmode="relative",
+        title=f"{ticker} Dealer Delta Exposure (DEX)",
+        xaxis_title="Strike Price",
+        yaxis_title="DEX (Millions of Shares)",
+        template="plotly_dark",
+        height=450,
+        legend=dict(orientation="h", y=1.05),
+        yaxis=dict(zeroline=True, zerolinecolor="rgba(255,255,255,0.4)"),
+    )
+    return fig
+
+
+def plot_iv_skew(iv_df: pd.DataFrame, spot: float, ticker: str,
+                 strike_range_pct: float = 0.15) -> go.Figure:
+    """
+    IV smile/skew chart: implied volatility vs strike for calls and puts.
+
+    Shows the classic volatility smile/skew with:
+    - Call IV (blue line)
+    - Put IV (red line)
+    - IV skew (put − call) as shaded area
+    - Spot price vertical line
+    """
+    if iv_df.empty:
+        fig = go.Figure()
+        fig.update_layout(title=f"No IV data for {ticker}", template="plotly_dark")
+        return fig
+
+    lo = spot * (1 - strike_range_pct)
+    hi = spot * (1 + strike_range_pct)
+    sub = iv_df[(iv_df["strike"] >= lo) & (iv_df["strike"] <= hi)].copy()
+    if sub.empty:
+        sub = iv_df.copy()
+
+    fig = make_subplots(
+        rows=2, cols=1, shared_xaxes=True,
+        row_heights=[0.7, 0.3],
+        vertical_spacing=0.06,
+        subplot_titles=[f"{ticker} Implied Volatility Skew", "Put-Call IV Spread"],
+    )
+
+    # Call IV
+    if "call_iv" in sub.columns:
+        valid_calls = sub.dropna(subset=["call_iv"])
+        fig.add_trace(go.Scatter(
+            x=valid_calls["strike"], y=valid_calls["call_iv"] * 100,
+            name="Call IV", mode="lines+markers",
+            line=dict(color="#4C9BE8", width=2),
+            marker=dict(size=3),
+            hovertemplate="Strike: %{x}<br>Call IV: %{y:.1f}%<extra></extra>",
+        ), row=1, col=1)
+
+    # Put IV
+    if "put_iv" in sub.columns:
+        valid_puts = sub.dropna(subset=["put_iv"])
+        fig.add_trace(go.Scatter(
+            x=valid_puts["strike"], y=valid_puts["put_iv"] * 100,
+            name="Put IV", mode="lines+markers",
+            line=dict(color="#E85C5C", width=2),
+            marker=dict(size=3),
+            hovertemplate="Strike: %{x}<br>Put IV: %{y:.1f}%<extra></extra>",
+        ), row=1, col=1)
+
+    # IV Skew (put - call)
+    if "iv_skew" in sub.columns:
+        valid_skew = sub.dropna(subset=["iv_skew"])
+        colors = ["#E85C5C" if v > 0 else "#4C9BE8" for v in valid_skew["iv_skew"]]
+        fig.add_trace(go.Bar(
+            x=valid_skew["strike"], y=valid_skew["iv_skew"] * 100,
+            name="Put−Call Skew", marker_color=colors, opacity=0.7,
+            hovertemplate="Strike: %{x}<br>Skew: %{y:+.1f}pp<extra></extra>",
+        ), row=2, col=1)
+
+    # Spot line on both subplots
+    for row in [1, 2]:
+        fig.add_vline(
+            x=spot, line_dash="dash", line_color="white", line_width=1.5,
+            row=row, col=1,
+        )
+
+    fig.update_layout(
+        template="plotly_dark",
+        height=500,
+        legend=dict(orientation="h", y=1.08),
+        showlegend=True,
+    )
+    fig.update_yaxes(title_text="IV (%)", row=1, col=1)
+    fig.update_yaxes(title_text="Skew (pp)", zeroline=True,
+                     zerolinecolor="rgba(255,255,255,0.3)", row=2, col=1)
+    fig.update_xaxes(title_text="Strike Price", row=2, col=1)
+
     return fig
