@@ -636,6 +636,10 @@ def plot_price_with_gex_levels(
     Candlestick chart of recent price action with GEX key levels overlaid
     as horizontal lines: call wall (resistance), put wall (support),
     gamma flip (regime boundary).
+
+    Y-axis is anchored to the price range — GEX levels that fall within
+    the visible window are drawn as full lines; levels outside the window
+    are shown as arrows/annotations at the chart edge.
     """
     fig = go.Figure()
 
@@ -649,8 +653,8 @@ def plot_price_with_gex_levels(
     df = price_df.copy()
     df.index = pd.to_datetime(df.index)
 
-    # Use last 15 trading days
-    df = df.tail(15)
+    # Use last 20 trading days for more context
+    df = df.tail(20)
 
     has_ohlc = all(c in df.columns for c in ["Open", "High", "Low", "Close"])
 
@@ -663,53 +667,63 @@ def plot_price_with_gex_levels(
             increasing_line_color="#5FC97B",
             decreasing_line_color="#E85C5C",
         ))
+        price_min = float(df["Low"].min())
+        price_max = float(df["High"].max())
     else:
         fig.add_trace(go.Scatter(
             x=df.index, y=df["Close"],
             mode="lines", name="Close",
             line=dict(color="#F5E642", width=2),
         ))
+        price_min = float(df["Close"].min())
+        price_max = float(df["Close"].max())
 
-    # Determine y-axis range from price data
-    if has_ohlc:
-        y_min = df["Low"].min()
-        y_max = df["High"].max()
-    else:
-        y_min = df["Close"].min()
-        y_max = df["Close"].max()
+    # ── Y-axis range: based on price with comfortable padding ──
+    price_range = price_max - price_min
+    pad = max(price_range * 0.25, spot * 0.01)  # at least 1% of spot
+    y_min = price_min - pad
+    y_max = price_max + pad
 
-    # Extend range to include GEX levels if they fall outside price range
-    levels = [v for v in [call_wall, put_wall, gamma_flip] if v is not None]
-    if levels:
-        y_min = min(y_min, min(levels)) * 0.998
-        y_max = max(y_max, max(levels)) * 1.002
+    # Gently extend if a GEX level is *just* outside (within 3% of spot)
+    near_threshold = spot * 0.03
+    for lvl in [call_wall, put_wall, gamma_flip]:
+        if lvl is not None:
+            if lvl < y_min and (y_min - lvl) < near_threshold:
+                y_min = lvl - pad * 0.2
+            elif lvl > y_max and (lvl - y_max) < near_threshold:
+                y_max = lvl + pad * 0.2
 
-    # ── GEX levels as horizontal lines ──
-    if call_wall is not None:
-        fig.add_hline(
-            y=call_wall, line_dash="solid", line_color="#4C9BE8", line_width=2,
-            annotation_text=f"Call Wall ${call_wall:,.0f}",
-            annotation_position="right",
-            annotation_font=dict(color="#4C9BE8", size=11),
-        )
+    # ── Helper: draw a GEX level (line if visible, edge annotation if off-screen) ──
+    def _add_level(value, label, color, dash="solid"):
+        if value is None:
+            return
+        if y_min <= value <= y_max:
+            # Level is visible — draw full horizontal line
+            fig.add_hline(
+                y=value, line_dash=dash, line_color=color, line_width=2,
+                annotation_text=f"{label} ${value:,.0f}",
+                annotation_position="right",
+                annotation_font=dict(color=color, size=11),
+            )
+        else:
+            # Level is off-screen — show arrow at chart edge
+            arrow_y = y_max if value > y_max else y_min
+            direction = "above" if value > y_max else "below"
+            dist_pct = abs(value - spot) / spot * 100
+            fig.add_annotation(
+                x=df.index[-1], y=arrow_y,
+                text=f"{'▲' if direction == 'above' else '▼'} {label} ${value:,.0f} ({dist_pct:.1f}% away)",
+                showarrow=False,
+                font=dict(color=color, size=10),
+                xanchor="right",
+                yanchor="bottom" if direction == "above" else "top",
+            )
 
-    if put_wall is not None:
-        fig.add_hline(
-            y=put_wall, line_dash="solid", line_color="#E85C5C", line_width=2,
-            annotation_text=f"Put Wall ${put_wall:,.0f}",
-            annotation_position="right",
-            annotation_font=dict(color="#E85C5C", size=11),
-        )
+    _add_level(call_wall, "Call Wall", "#4C9BE8")
+    _add_level(put_wall, "Put Wall", "#E85C5C")
+    _add_level(gamma_flip, "Gamma Flip", "#F28C38", dash="dash")
 
-    if gamma_flip is not None:
-        fig.add_hline(
-            y=gamma_flip, line_dash="dash", line_color="#F28C38", line_width=2,
-            annotation_text=f"Gamma Flip ${gamma_flip:,.0f}",
-            annotation_position="right",
-            annotation_font=dict(color="#F28C38", size=11),
-        )
-
-    # Top strikes as subtle dotted lines (skip if too close to walls/flip)
+    # Top strikes as subtle dotted lines (only if visible and not duplicating walls/flip)
     if top_strikes:
         existing = {call_wall, put_wall, gamma_flip}
         for ts in top_strikes[:3]:
@@ -717,18 +731,15 @@ def plot_price_with_gex_levels(
             if strike and strike not in existing and y_min <= strike <= y_max:
                 fig.add_hline(
                     y=strike, line_dash="dot",
-                    line_color="rgba(180,180,180,0.35)", line_width=1,
+                    line_color="rgba(180,180,180,0.3)", line_width=1,
                 )
 
     fig.update_layout(
-        title=f"{ticker} Price + GEX Key Levels (15d)",
+        title=f"{ticker} Price + GEX Key Levels (20d)",
         template="plotly_dark",
-        height=400,
+        height=420,
         xaxis_rangeslider_visible=False,
-        yaxis=dict(
-            title="Price",
-            range=[y_min, y_max],
-        ),
+        yaxis=dict(title="Price", range=[y_min, y_max]),
         legend=dict(orientation="h", y=1.05),
     )
     return fig
