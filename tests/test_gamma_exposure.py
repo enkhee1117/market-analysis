@@ -679,7 +679,7 @@ def test_save_snapshot_overwrites_same_day(tmp_path, monkeypatch):
 def test_load_history_empty_for_unknown_ticker(tmp_path, monkeypatch):
     hist_file = str(tmp_path / "gamma_index_history.json")
     monkeypatch.setattr("modules.gamma_exposure._HISTORY_FILE", hist_file)
-    df = load_gamma_index_history("AAPL")
+    df = load_gamma_index_history("ZZZZZ_FAKE_TICKER")
     assert df.empty
 
 

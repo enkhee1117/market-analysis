@@ -131,9 +131,6 @@ gex_ticker = _gex_custom.strip().upper() if _gex_custom.strip() else _gex_preset
 
 st.sidebar.markdown("---")
 
-# ── Data Freshness Display ────────────────────────────────────────────────
-st.sidebar.subheader("Data Status")
-
 import time as _time
 
 # Get freshness info (cache this briefly to avoid hammering Supabase on every rerun)
@@ -143,61 +140,45 @@ def _get_freshness():
 
 _freshness = _get_freshness()
 _staleness = data_staleness_info(_freshness)
+_market_open = is_market_open()
 
-# Status indicator with timestamp
-_ts_label = _staleness.get("options_age_str", "N/A")
-if _staleness["status"] == "fresh":
-    st.sidebar.success(f"🟢 {_staleness['message']}  ({_ts_label})")
-elif _staleness["status"] == "stale":
-    st.sidebar.warning(f"🟡 {_staleness['message']}  (last pull: {_ts_label})")
-else:
-    st.sidebar.info(f"⚪ {_staleness['message']}")
-
-# Timestamps
-st.sidebar.caption(f"Options data: {_staleness['options_age_str']}")
-st.sidebar.caption(f"Price data: {_staleness['price_age_str']}")
-
-if _freshness.get("supabase_connected"):
-    st.sidebar.caption("💾 Supabase: connected")
-else:
-    st.sidebar.caption("💾 Supabase: not connected (local cache only)")
-
-if is_market_open():
-    st.sidebar.caption("🔔 Market: OPEN")
-else:
-    st.sidebar.caption("🔕 Market: CLOSED")
-
-st.sidebar.markdown("---")
+# Compact status line — always visible
+_status_icon = {"fresh": "🟢", "stale": "🟡"}.get(_staleness["status"], "⚪")
+_market_icon = "🔔" if _market_open else "🔕"
+st.sidebar.caption(f"{_status_icon} {_staleness['message']}  {_market_icon} {'Market Open' if _market_open else 'Market Closed'}")
 
 # Rate-limit protection: track last refresh time in session state
 if "last_force_refresh" not in st.session_state:
     st.session_state["last_force_refresh"] = 0.0
 
 _now = _time.time()
-# Shorter cooldown during market hours (2 min), longer off-hours (5 min)
-_cooldown_secs = 120 if is_market_open() else 300
+_cooldown_secs = 120 if _market_open else 300
 _cooldown_remaining = max(0, _cooldown_secs - (_now - st.session_state["last_force_refresh"]))
 
 if _cooldown_remaining > 0:
     st.sidebar.button(
-        f"🔄 Refresh Data (wait {int(_cooldown_remaining)}s)",
+        f"Refresh Data (wait {int(_cooldown_remaining)}s)",
         disabled=True,
     )
 elif _staleness.get("is_stale"):
-    # Highlight refresh button when data is stale
-    if st.sidebar.button("🔄 Refresh Data (Stale!)", type="primary"):
+    if st.sidebar.button("Refresh Data (Stale!)", type="primary"):
         st.session_state["last_force_refresh"] = _now
         clear_today_cache()
         st.cache_data.clear()
         st.rerun()
 else:
-    if st.sidebar.button("🔄 Refresh Data"):
+    if st.sidebar.button("Refresh Data"):
         st.session_state["last_force_refresh"] = _now
         clear_today_cache()
         st.cache_data.clear()
         st.rerun()
 
-st.sidebar.caption("GEX assumes MM short calls, long puts")
+# Detailed status in collapsible section
+with st.sidebar.expander("Data Details"):
+    st.caption(f"Options: {_staleness['options_age_str']}")
+    st.caption(f"Prices: {_staleness['price_age_str']}")
+    st.caption(f"Supabase: {'connected' if _freshness.get('supabase_connected') else 'local cache only'}")
+    st.caption("GEX assumes MM short calls, long puts")
 
 
 # ── Tabs ──────────────────────────────────────────────────────────────────────
@@ -214,11 +195,11 @@ tab1, tab2, tab3, tab4 = st.tabs([
 # TAB 1 — Day of Week Performance
 # ═════════════════════════════════════════════════════════════════════════════
 
-with tab1:
+@st.fragment
+def _render_dow_tab():
     st.title("Day of Week Performance")
     st.markdown("Analyze how SPY (or selected ETF) performs on specific weekdays across different timeframes.")
 
-    # Return type selector
     return_type_label = st.radio(
         "Return Type",
         list(RETURN_TYPES.keys()),
@@ -245,26 +226,25 @@ with tab1:
         dist_timeframe = st.selectbox(
             "Distribution Chart Timeframe",
             list(TIMEFRAMES.keys()),
-            index=3,  # 12 Months default
+            index=3,
         )
 
     if not selected_days:
         st.warning("Select at least one day.")
-        st.stop()
+        return
     if not selected_timeframes:
         st.warning("Select at least one timeframe.")
-        st.stop()
+        return
 
     with st.spinner(f"Fetching {spy_ticker} 10-year daily data..."):
         raw = fetch_price_history(spy_ticker, period="10y", interval="1d")
 
     if raw.empty:
         st.error(f"Could not fetch data for {spy_ticker}.")
-        st.stop()
+        return
 
     dow_data = compute_dow_returns(raw)
 
-    # Summary table for selected distribution timeframe
     filtered = filter_by_timeframe(dow_data, dist_timeframe)
     summary  = dow_summary(filtered, selected_days, return_col=return_col)
 
@@ -296,12 +276,10 @@ with tab1:
 
     st.markdown("---")
 
-    # Main comparison chart
     st.subheader("Mean Return by Timeframe")
     fig_cmp = plot_dow_comparison(dow_data, selected_days, selected_timeframes, return_col=return_col)
     st.plotly_chart(fig_cmp, use_container_width=True)
 
-    # Win rate chart
     st.subheader("Win Rate by Timeframe")
     fig_wr = plot_win_rate_comparison(dow_data, selected_days, selected_timeframes, return_col=return_col)
     st.plotly_chart(fig_wr, use_container_width=True)
@@ -317,19 +295,17 @@ with tab1:
         fig_cum = plot_cumulative_by_dow(dow_data, selected_days, dist_timeframe, return_col=return_col)
         st.plotly_chart(fig_cum, use_container_width=True)
 
+with tab1:
+    _render_dow_tab()
+
 
 # ═════════════════════════════════════════════════════════════════════════════
 # TAB 2 — Gamma Exposure
 # ═════════════════════════════════════════════════════════════════════════════
 
-with tab2:
+@st.fragment
+def _render_gex_tab():
     st.title(f"Dealer Gamma Exposure (GEX) — {gex_ticker}")
-    st.markdown("""
-    **Interpretation:**
-    - **Positive GEX** → Dealers are net long gamma → sell rallies / buy dips → **stabilizing**
-    - **Negative GEX** → Dealers are net short gamma → buy rallies / sell dips → **destabilizing / trending**
-    - **Gamma Flip** = strike where net GEX crosses zero; acts as key support/resistance
-    """)
 
     ctrl_cols = st.columns([2, 2, 4])
     with ctrl_cols[0]:
@@ -348,7 +324,7 @@ with tab2:
             st.warning(f"Massive.com API: {massive_err}")
         if gex_ticker == "SPX":
             st.info("Try switching to SPY in the sidebar — SPX options data availability varies.")
-        st.stop()
+        return
 
     st.caption(f"Data source: {data_source} · Cached daily")
 
@@ -357,21 +333,60 @@ with tab2:
         flip    = gex_flip_point(gex_df, spot)
         metrics = total_gex_metrics(gex_df)
         gamma_idx = compute_gamma_index(gex_df, spot)
-        # Persist today's gamma index for the timeline chart
         save_gamma_index_snapshot(gex_ticker, gamma_idx, spot)
 
     if gex_df.empty:
         st.warning("GEX data empty — options gamma/OI fields may be missing in the data.")
-        st.stop()
+        return
 
-    # ── Gamma Index panel ────────────────────────────────────────────────────
-    st.subheader("Gamma Index")
+    # ── Dynamic interpretation banner ─────────────────────────────────────
     gi_val = gamma_idx.get("gamma_index", 0)
     gi_cond = gamma_idx.get("gamma_condition", "N/A")
     gi_tilt = gamma_idx.get("gamma_tilt", 0.5)
     gi_conc = gamma_idx.get("gamma_concentration", 0)
     cw = gamma_idx.get("call_wall")
     pw = gamma_idx.get("put_wall")
+
+    _interp_parts = []
+    if gi_val > 0:
+        _interp_parts.append(
+            f"**{gex_ticker}** is in **positive gamma** ({gi_val:+.3f}B) — "
+            f"dealers will sell rallies and buy dips, keeping price **pinned**. "
+            f"Expect low realized vol and mean-reversion."
+        )
+    elif gi_val < 0:
+        _interp_parts.append(
+            f"**{gex_ticker}** is in **negative gamma** ({gi_val:+.3f}B) — "
+            f"dealers amplify moves in both directions. "
+            f"Expect elevated realized vol and trending/momentum behavior."
+        )
+    else:
+        _interp_parts.append(f"**{gex_ticker}** gamma is **neutral**.")
+
+    if flip is not None:
+        _flip_dist = ((spot - flip) / spot) * 100
+        _flip_dir = "above" if _flip_dist > 0 else "below"
+        _interp_parts.append(
+            f"Spot ${spot:.2f} is **{abs(_flip_dist):.1f}% {_flip_dir}** "
+            f"the gamma flip at ${flip:.2f}."
+        )
+
+    if cw and pw:
+        _interp_parts.append(
+            f"Key range: **${pw:,.0f}** (put wall / support) to "
+            f"**${cw:,.0f}** (call wall / resistance)."
+        )
+
+    if gi_conc > 0.5:
+        _interp_parts.append(
+            f"Gamma is **heavily concentrated** ({gi_conc:.0%}) near spot — strong pin risk."
+        )
+
+    _banner_type = "success" if gi_val > 0 else ("error" if gi_val < 0 else "info")
+    getattr(st, _banner_type)("  \n".join(_interp_parts))
+
+    # ── Gamma Index metrics row ───────────────────────────────────────────
+    st.subheader("Gamma Index")
 
     gi_cols = st.columns(6)
     with gi_cols[0]:
@@ -395,7 +410,6 @@ with tab2:
         colored_metric("Concentration", f"{gi_conc:.0%}",
                        sub="within ±2% of spot")
 
-    # Top strikes
     top_strikes = gamma_idx.get("top_strikes", [])
     if top_strikes:
         with st.expander("Top 5 Strikes by Gamma"):
@@ -414,59 +428,29 @@ with tab2:
                 use_container_width=True, hide_index=True,
             )
 
-    # Gamma Index timeline (real data + historical proxy)
-    # VIX-based proxy is only meaningful for SPY/SPX (broad market gamma)
+    # Gamma Index timeline
     with st.spinner("Building Gamma Index timeline..."):
         if gex_ticker in ("SPY", "SPX"):
             _spy_hist_for_proxy = fetch_price_history("SPY", period="2y", interval="1d")
             _vix_hist_for_proxy = fetch_price_history("^VIX", period="2y", interval="1d")
             _proxy_df = compute_historical_gamma_proxy(_spy_hist_for_proxy, _vix_hist_for_proxy)
         else:
-            _proxy_df = None  # No proxy for individual stocks
+            _proxy_df = None
 
     fig_gi_timeline = plot_gamma_index_timeline(gex_ticker, proxy_df=_proxy_df)
     st.plotly_chart(fig_gi_timeline, use_container_width=True)
 
     st.markdown("---")
 
-    # ── GEX metrics row ──────────────────────────────────────────────────────
-    st.subheader("GEX Summary")
-    m_cols = st.columns(6)
-    with m_cols[0]: colored_metric("Spot Price", f"${spot:.2f}")
-    with m_cols[1]:
-        flip_str = f"${flip:.2f}" if flip else "N/A"
-        colored_metric("Gamma Flip", flip_str, positive_is_good=False)
-    with m_cols[2]:
-        net = metrics.get("total_net_gex_b", 0)
-        colored_metric("Net GEX", f"${net:.2f}B")
-    with m_cols[3]:
-        call_g = metrics.get("total_call_gex_b", 0)
-        colored_metric("Call GEX", f"${call_g:.2f}B")
-    with m_cols[4]:
-        put_g = metrics.get("total_put_gex_b", 0)
-        colored_metric("Put GEX", f"${put_g:.2f}B", positive_is_good=False)
-    with m_cols[5]:
-        if flip:
-            diff = ((spot - flip) / spot) * 100
-            colored_metric("Spot vs Flip", f"{diff:+.2f}%",
-                          sub="above" if diff > 0 else "below")
-        else:
-            colored_metric("Spot vs Flip", "N/A")
-
-    st.markdown("---")
-
-    # GEX Profile
     fig_gex = plot_gex_profile(gex_df, spot, gex_ticker,
                                strike_range_pct=strike_range / 100,
                                view_mode=gex_view)
     st.plotly_chart(fig_gex, use_container_width=True)
 
-    # GEX by expiration
     st.subheader("GEX by Expiration")
     fig_exp = plot_gex_by_expiration(calls_df, puts_df, spot, gex_ticker)
     st.plotly_chart(fig_exp, use_container_width=True)
 
-    # Raw GEX data table
     with st.expander("Raw GEX Data Table"):
         lo = spot * (1 - strike_range / 100)
         hi = spot * (1 + strike_range / 100)
@@ -494,12 +478,16 @@ with tab2:
             use_container_width=True, hide_index=True,
         )
 
+with tab2:
+    _render_gex_tab()
+
 
 # ═════════════════════════════════════════════════════════════════════════════
 # TAB 3 — VIX / Volatility Analysis
 # ═════════════════════════════════════════════════════════════════════════════
 
-with tab3:
+@st.fragment
+def _render_vix_tab():
     st.title("VIX / VVIX / SVIX Analysis")
     st.markdown("""
     - **VIX** — 30-day implied volatility of S&P 500 options ("fear gauge")
@@ -514,16 +502,14 @@ with tab3:
 
     if vix_raw.empty:
         st.error("Could not fetch VIX data.")
-        st.stop()
+        return
 
-    # Rename columns
     rename_map = {"^VIX": "VIX", "^VVIX": "VVIX", "SVIX": "SVIX"}
     vix_raw = vix_raw.rename(columns={k: v for k, v in rename_map.items() if k in vix_raw.columns})
 
     vix_df = compute_vix_metrics(vix_raw)
     stats  = vix_summary_stats(vix_df)
 
-    # VIX summary metrics
     if stats:
         st.subheader("VIX Current Snapshot")
         sc = st.columns(6)
@@ -540,7 +526,6 @@ with tab3:
 
     st.markdown("---")
 
-    # VIX Panel
     fig_vix = plot_vix_panel(vix_df)
     st.plotly_chart(fig_vix, use_container_width=True)
 
@@ -555,17 +540,14 @@ with tab3:
         fig_z = plot_vix_zscore(vix_df)
         st.plotly_chart(fig_z, use_container_width=True)
 
-    # Term structure proxy
     st.subheader("VIX Momentum / Term Structure Proxy")
     fig_ts = plot_vix_term_structure_proxy(vix_df)
     st.plotly_chart(fig_ts, use_container_width=True)
 
-    # Correlation matrix
     st.subheader("Correlation Matrix")
     fig_corr = plot_correlation_matrix(vix_df, spy_hist)
     st.plotly_chart(fig_corr, use_container_width=True)
 
-    # VIX regime table
     with st.expander("VIX Regime Distribution"):
         if "VIX" in vix_df.columns:
             vix_vals = vix_df["VIX"].dropna()
@@ -573,7 +555,7 @@ with tab3:
                 "Low (< 15)":       (vix_vals < 15).sum(),
                 "Moderate (15-20)": ((vix_vals >= 15) & (vix_vals < 20)).sum(),
                 "Elevated (20-30)": ((vix_vals >= 20) & (vix_vals < 30)).sum(),
-                "High (≥ 30)":      (vix_vals >= 30).sum(),
+                "High (>= 30)":     (vix_vals >= 30).sum(),
             }
             total = sum(regimes.values())
             regime_df = pd.DataFrame([
@@ -582,12 +564,16 @@ with tab3:
             ])
             st.dataframe(regime_df, use_container_width=True, hide_index=True)
 
+with tab3:
+    _render_vix_tab()
+
 
 # ═════════════════════════════════════════════════════════════════════════════
 # TAB 4 — Seasonality
 # ═════════════════════════════════════════════════════════════════════════════
 
-with tab4:
+@st.fragment
+def _render_seasonality_tab():
     st.title(f"{spy_ticker} Seasonality Analysis")
     st.markdown("Historical patterns by month, week, and day-of-month.")
 
@@ -596,7 +582,7 @@ with tab4:
 
     if seas_raw.empty:
         st.error(f"Could not fetch data for {spy_ticker}.")
-        st.stop()
+        return
 
     seas_df    = compute_returns(seas_raw)
     monthly_df = monthly_seasonality(seas_df)
@@ -604,11 +590,9 @@ with tab4:
     weekly_df  = weekly_seasonality(seas_df)
     intra_df   = intramonth_seasonality(seas_df)
 
-    # ── Monthly Seasonality
     st.subheader("Monthly Seasonality")
 
     if not monthly_df.empty:
-        # Best / worst months
         best  = monthly_df.loc[monthly_df["Mean %"].idxmax()]
         worst = monthly_df.loc[monthly_df["Mean %"].idxmin()]
         high_wr = monthly_df.loc[monthly_df["Win Rate %"].idxmax()]
@@ -626,7 +610,6 @@ with tab4:
     fig_mb = plot_monthly_bar(monthly_df)
     st.plotly_chart(fig_mb, use_container_width=True)
 
-    # Monthly stats table
     with st.expander("Monthly Statistics Table"):
         def _seasonal_color(v):
             try:
@@ -645,8 +628,7 @@ with tab4:
 
     st.markdown("---")
 
-    # ── Monthly Heatmap
-    st.subheader("Monthly Return Heatmap (Year × Month)")
+    st.subheader("Monthly Return Heatmap (Year x Month)")
     fig_hm = plot_monthly_heatmap(pivot_df)
     st.plotly_chart(fig_hm, use_container_width=True)
 
@@ -654,18 +636,18 @@ with tab4:
 
     col_s1, col_s2 = st.columns(2)
     with col_s1:
-        # ── Annual Returns
         st.subheader("Annual Return by Year")
         fig_ann = plot_annual_return_bar(seas_df)
         st.plotly_chart(fig_ann, use_container_width=True)
 
     with col_s2:
-        # ── Intra-Month
         st.subheader("Intra-Month Pattern (Day of Month)")
         fig_intra = plot_intramonth_bar(intra_df)
         st.plotly_chart(fig_intra, use_container_width=True)
 
-    # ── Weekly Seasonality
     st.subheader("Weekly Seasonality (Week of Year)")
     fig_wk = plot_weekly_bar(weekly_df)
     st.plotly_chart(fig_wk, use_container_width=True)
+
+with tab4:
+    _render_seasonality_tab()
