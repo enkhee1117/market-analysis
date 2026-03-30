@@ -952,22 +952,35 @@ def plot_price_with_gex_levels(
 
 def plot_gex_profile(gex_df: pd.DataFrame, spot: float, ticker: str,
                      strike_range_pct: float = 0.10,
-                     view_mode: str = "Call / Put") -> go.Figure:
+                     view_mode: str = "Call / Put",
+                     call_wall: float | None = None,
+                     put_wall: float | None = None) -> go.Figure:
     """
     Bar chart showing GEX per strike.
 
     view_mode:
       "Call / Put" — stacked call (blue) + put (red) bars with net GEX yellow line.
       "Net GEX"    — single bar series coloured green (positive) / red (negative).
+
+    call_wall / put_wall: if provided, the strike range is automatically
+    expanded to include these key levels so they are never cut off.
     """
     if gex_df.empty:
         fig = go.Figure()
         fig.update_layout(title=f"No options data available for {ticker}", template="plotly_dark")
         return fig
 
-    # Filter to ±range% of spot for readability
+    # Filter to ±range% of spot, then expand to include key levels
     lo = spot * (1 - strike_range_pct)
     hi = spot * (1 + strike_range_pct)
+
+    # Expand range to always include call wall & put wall with a small pad
+    pad = spot * 0.02  # 2% padding beyond the level
+    if call_wall is not None and call_wall > hi:
+        hi = call_wall + pad
+    if put_wall is not None and put_wall < lo:
+        lo = put_wall - pad
+
     sub = gex_df[(gex_df["strike"] >= lo) & (gex_df["strike"] <= hi)].copy()
 
     if sub.empty:
@@ -1214,12 +1227,16 @@ def plot_dex_by_expiration(calls_df: pd.DataFrame, puts_df: pd.DataFrame,
 
 
 def plot_dex_profile(dex_df: pd.DataFrame, spot: float, ticker: str,
-                     strike_range_pct: float = 0.10) -> go.Figure:
+                     strike_range_pct: float = 0.10,
+                     call_wall: float | None = None,
+                     put_wall: float | None = None) -> go.Figure:
     """
     Bar chart of dealer Delta Exposure (DEX) per strike.
 
     Positive net DEX = dealers need to sell shares (bearish hedge pressure).
     Negative net DEX = dealers need to buy shares (bullish hedge pressure).
+
+    call_wall / put_wall: if provided, range auto-expands to include them.
     """
     if dex_df.empty:
         fig = go.Figure()
@@ -1228,6 +1245,14 @@ def plot_dex_profile(dex_df: pd.DataFrame, spot: float, ticker: str,
 
     lo = spot * (1 - strike_range_pct)
     hi = spot * (1 + strike_range_pct)
+
+    # Expand range to always include call wall & put wall
+    pad = spot * 0.02
+    if call_wall is not None and call_wall > hi:
+        hi = call_wall + pad
+    if put_wall is not None and put_wall < lo:
+        lo = put_wall - pad
+
     sub = dex_df[(dex_df["strike"] >= lo) & (dex_df["strike"] <= hi)].copy()
     if sub.empty:
         sub = dex_df.copy()

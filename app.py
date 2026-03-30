@@ -464,7 +464,8 @@ def _render_gex_tab():
 
     fig_gex = plot_gex_profile(gex_df, spot, gex_ticker,
                                strike_range_pct=strike_range / 100,
-                               view_mode=gex_view)
+                               view_mode=gex_view,
+                               call_wall=cw, put_wall=pw)
     st.plotly_chart(fig_gex, use_container_width=True)
 
     col_gex_exp, col_dex_exp = st.columns(2)
@@ -493,7 +494,8 @@ def _render_gex_tab():
             colored_metric("Net Delta Exposure", f"{net_dex:+.1f}M shares",
                            sub=dex_label)
             fig_dex = plot_dex_profile(dex_df, spot, gex_ticker,
-                                       strike_range_pct=strike_range / 100)
+                                       strike_range_pct=strike_range / 100,
+                                       call_wall=cw, put_wall=pw)
             st.plotly_chart(fig_dex, use_container_width=True)
         else:
             st.info("DEX data unavailable — delta could not be computed.")
