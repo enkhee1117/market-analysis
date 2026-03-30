@@ -316,11 +316,7 @@ with tab1:
 def _render_gex_tab():
     st.title(f"Dealer Gamma Exposure (GEX) — {gex_ticker}")
 
-    ctrl_cols = st.columns([2, 2, 4])
-    with ctrl_cols[0]:
-        strike_range = st.slider("Strike Range (±%)", 5, 20, 10, step=1)
-    with ctrl_cols[1]:
-        gex_view = st.radio("Chart View", ["Call / Put", "Net GEX"], horizontal=True)
+    gex_view = st.radio("Chart View", ["Call / Put", "Net GEX"], horizontal=True)
 
     with st.spinner(f"Fetching {gex_ticker} options chain..."):
         calls_df, puts_df, spot, data_source = fetch_options_chain(gex_ticker)
@@ -463,7 +459,6 @@ def _render_gex_tab():
     st.markdown("---")
 
     fig_gex = plot_gex_profile(gex_df, spot, gex_ticker,
-                               strike_range_pct=strike_range / 100,
                                view_mode=gex_view,
                                call_wall=cw, put_wall=pw)
     st.plotly_chart(fig_gex, use_container_width=True)
@@ -494,7 +489,6 @@ def _render_gex_tab():
             colored_metric("Net Delta Exposure", f"{net_dex:+.1f}M shares",
                            sub=dex_label)
             fig_dex = plot_dex_profile(dex_df, spot, gex_ticker,
-                                       strike_range_pct=strike_range / 100,
                                        call_wall=cw, put_wall=pw)
             st.plotly_chart(fig_dex, use_container_width=True)
         else:
@@ -511,8 +505,7 @@ def _render_gex_tab():
             if not atm_data.empty and "call_iv" in atm_data.columns:
                 atm_iv = atm_data["call_iv"].mean() * 100
                 colored_metric("ATM Implied Vol", f"{atm_iv:.1f}%", sub="Near-money average")
-            fig_iv = plot_iv_skew(iv_df, spot, gex_ticker,
-                                  strike_range_pct=strike_range / 100)
+            fig_iv = plot_iv_skew(iv_df, spot, gex_ticker)
             st.plotly_chart(fig_iv, use_container_width=True)
         else:
             st.info("IV skew data unavailable.")
@@ -520,8 +513,8 @@ def _render_gex_tab():
     st.markdown("---")
 
     # ── Raw GEX data + export ────────────────────────────────────────────
-    lo = spot * (1 - strike_range / 100)
-    hi = spot * (1 + strike_range / 100)
+    lo = spot * 0.90
+    hi = spot * 1.10
     sub_gex = gex_df[(gex_df["strike"] >= lo) & (gex_df["strike"] <= hi)].copy()
     sub_gex_disp = sub_gex[["strike", "call_gex_b", "put_gex_b", "net_gex_b"]].rename(
         columns={

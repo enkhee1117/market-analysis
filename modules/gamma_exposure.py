@@ -950,48 +950,59 @@ def plot_price_with_gex_levels(
     return fig
 
 
+def _trim_to_activity(df: pd.DataFrame, col: str, spot: float,
+                      threshold_pct: float = 0.005) -> pd.DataFrame:
+    """Trim a GEX/DEX DataFrame to the range of strikes with meaningful activity.
+
+    Removes empty outer edges while keeping all strikes between the outermost
+    ones that exceed `threshold_pct` of peak absolute value.  Always includes
+    a small pad of 2 strikes on each side so bars don't sit on the edge.
+    """
+    peak = df[col].abs().max()
+    if peak == 0:
+        return df
+    cutoff = peak * threshold_pct
+    active = df[df[col].abs() >= cutoff]
+    if active.empty:
+        return df
+    lo_strike = active["strike"].min()
+    hi_strike = active["strike"].max()
+    # Pad: include 2 strikes beyond the outermost active ones
+    all_strikes = sorted(df["strike"].unique())
+    lo_idx = max(0, all_strikes.index(lo_strike) - 2) if lo_strike in all_strikes else 0
+    hi_idx = min(len(all_strikes) - 1, all_strikes.index(hi_strike) + 2) if hi_strike in all_strikes else len(all_strikes) - 1
+    return df[(df["strike"] >= all_strikes[lo_idx]) & (df["strike"] <= all_strikes[hi_idx])].copy()
+
+
 def plot_gex_profile(gex_df: pd.DataFrame, spot: float, ticker: str,
                      strike_range_pct: float = 0.10,
                      view_mode: str = "Call / Put",
                      call_wall: float | None = None,
                      put_wall: float | None = None) -> go.Figure:
     """
-    Bar chart showing GEX per strike.
+    Bar chart showing GEX per strike with a rangeslider for zoom control.
+
+    Shows all strikes with meaningful activity (auto-trimmed), with the
+    initial view focused on ±strike_range_pct around spot.  Users can
+    drag the rangeslider to zoom in/out without losing data.
 
     view_mode:
-      "Call / Put" — stacked call (blue) + put (red) bars with net GEX yellow line.
+      "Call / Put" — stacked call (blue) + put (red) bars.
       "Net GEX"    — single bar series coloured green (positive) / red (negative).
-
-    call_wall / put_wall: if provided, the strike range is automatically
-    expanded to include these key levels so they are never cut off.
     """
     if gex_df.empty:
         fig = go.Figure()
         fig.update_layout(title=f"No options data available for {ticker}", template="plotly_dark")
         return fig
 
-    # Filter to ±range% of spot, then expand to include key levels
-    lo = spot * (1 - strike_range_pct)
-    hi = spot * (1 + strike_range_pct)
-
-    # Expand range to always include call wall & put wall with a small pad
-    pad = spot * 0.02  # 2% padding beyond the level
-    if call_wall is not None and call_wall > hi:
-        hi = call_wall + pad
-    if put_wall is not None and put_wall < lo:
-        lo = put_wall - pad
-
-    sub = gex_df[(gex_df["strike"] >= lo) & (gex_df["strike"] <= hi)].copy()
-
-    if sub.empty:
-        sub = gex_df.copy()
+    # ── Trim to strikes with meaningful activity (remove empty edges) ──
+    sub = _trim_to_activity(gex_df, "net_gex_b", spot)
 
     flip = gex_flip_point(gex_df, spot)
 
     fig = go.Figure()
 
     if view_mode == "Net GEX":
-        # Color each bar by sign: green positive, red negative
         colors = ["#5FC97B" if v >= 0 else "#E85C5C" for v in sub["net_gex_b"]]
         fig.add_trace(go.Bar(
             x=sub["strike"],
@@ -1002,7 +1013,6 @@ def plot_gex_profile(gex_df: pd.DataFrame, spot: float, ticker: str,
             hovertemplate="Strike: %{x}<br>Net GEX: %{y:.3f}B<extra></extra>",
         ))
     else:
-        # Call GEX bars (positive)
         fig.add_trace(go.Bar(
             x=sub["strike"],
             y=sub["call_gex_b"],
@@ -1011,8 +1021,6 @@ def plot_gex_profile(gex_df: pd.DataFrame, spot: float, ticker: str,
             opacity=0.8,
             hovertemplate="Strike: %{x}<br>Call GEX: %{y:.3f}B<extra></extra>",
         ))
-
-        # Put GEX bars (negative)
         fig.add_trace(go.Bar(
             x=sub["strike"],
             y=sub["put_gex_b"],
@@ -1024,27 +1032,28 @@ def plot_gex_profile(gex_df: pd.DataFrame, spot: float, ticker: str,
 
     # Spot price line
     fig.add_vline(
-        x=spot,
-        line_dash="dash",
-        line_color="white",
-        line_width=2,
+        x=spot, line_dash="dash", line_color="white", line_width=2,
         annotation_text=f"Spot: {spot:.2f}",
-        annotation_position="top right",
-        annotation_font_color="white",
+        annotation_position="top right", annotation_font_color="white",
     )
 
     # Gamma flip line
     if flip is not None:
         color = "#5FC97B" if flip > spot else "#F28C38"
         fig.add_vline(
-            x=flip,
-            line_dash="dot",
-            line_color=color,
-            line_width=2,
-            annotation_text=f"Flip: {flip:.2f}",
-            annotation_position="top left",
-            annotation_font_color=color,
+            x=flip, line_dash="dot", line_color=color, line_width=2,
+            annotation_text=f"Flip: {flip:.0f}",
+            annotation_position="top left", annotation_font_color=color,
         )
+
+    # ── Initial zoom: ±range% of spot, expanded to include key levels ──
+    view_lo = spot * (1 - strike_range_pct)
+    view_hi = spot * (1 + strike_range_pct)
+    pad = spot * 0.02
+    if call_wall is not None and call_wall > view_hi:
+        view_hi = call_wall + pad
+    if put_wall is not None and put_wall < view_lo:
+        view_lo = put_wall - pad
 
     view_label = "Net" if view_mode == "Net GEX" else "Call / Put"
     fig.update_layout(
@@ -1056,6 +1065,10 @@ def plot_gex_profile(gex_df: pd.DataFrame, spot: float, ticker: str,
         height=550,
         legend=dict(orientation="h", y=1.05),
         yaxis=dict(zeroline=True, zerolinecolor="rgba(255,255,255,0.4)"),
+        xaxis=dict(
+            range=[view_lo, view_hi],
+            rangeslider=dict(visible=True, thickness=0.06),
+        ),
     )
     return fig
 
@@ -1231,31 +1244,21 @@ def plot_dex_profile(dex_df: pd.DataFrame, spot: float, ticker: str,
                      call_wall: float | None = None,
                      put_wall: float | None = None) -> go.Figure:
     """
-    Bar chart of dealer Delta Exposure (DEX) per strike.
+    Bar chart of dealer Delta Exposure (DEX) per strike with rangeslider.
+
+    Shows all strikes with meaningful activity (auto-trimmed), initial
+    view focused on ±strike_range_pct around spot.
 
     Positive net DEX = dealers need to sell shares (bearish hedge pressure).
     Negative net DEX = dealers need to buy shares (bullish hedge pressure).
-
-    call_wall / put_wall: if provided, range auto-expands to include them.
     """
     if dex_df.empty:
         fig = go.Figure()
         fig.update_layout(title=f"No DEX data for {ticker}", template="plotly_dark")
         return fig
 
-    lo = spot * (1 - strike_range_pct)
-    hi = spot * (1 + strike_range_pct)
-
-    # Expand range to always include call wall & put wall
-    pad = spot * 0.02
-    if call_wall is not None and call_wall > hi:
-        hi = call_wall + pad
-    if put_wall is not None and put_wall < lo:
-        lo = put_wall - pad
-
-    sub = dex_df[(dex_df["strike"] >= lo) & (dex_df["strike"] <= hi)].copy()
-    if sub.empty:
-        sub = dex_df.copy()
+    # ── Trim to strikes with meaningful activity ──
+    sub = _trim_to_activity(dex_df, "net_dex_m", spot)
 
     fig = go.Figure()
 
@@ -1287,6 +1290,15 @@ def plot_dex_profile(dex_df: pd.DataFrame, spot: float, ticker: str,
 
     fig.add_hline(y=0, line_dash="dash", line_color="rgba(255,255,255,0.3)")
 
+    # ── Initial zoom: ±range% of spot, expanded to include key levels ──
+    view_lo = spot * (1 - strike_range_pct)
+    view_hi = spot * (1 + strike_range_pct)
+    pad = spot * 0.02
+    if call_wall is not None and call_wall > view_hi:
+        view_hi = call_wall + pad
+    if put_wall is not None and put_wall < view_lo:
+        view_lo = put_wall - pad
+
     fig.update_layout(
         barmode="relative",
         title=f"{ticker} Dealer Delta Exposure (DEX)",
@@ -1296,6 +1308,10 @@ def plot_dex_profile(dex_df: pd.DataFrame, spot: float, ticker: str,
         height=450,
         legend=dict(orientation="h", y=1.05),
         yaxis=dict(zeroline=True, zerolinecolor="rgba(255,255,255,0.4)"),
+        xaxis=dict(
+            range=[view_lo, view_hi],
+            rangeslider=dict(visible=True, thickness=0.06),
+        ),
     )
     return fig
 
