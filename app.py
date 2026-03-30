@@ -36,30 +36,24 @@ from modules.day_of_week import (
     TIMEFRAMES,
     RETURN_TYPES,
 )
-try:
-    from modules.gamma_exposure import (
-        compute_gex,
-        gex_flip_point,
-        total_gex_metrics,
-        compute_gamma_index,
-        compute_historical_gamma_proxy,
-        compute_dex,
-        total_dex_metrics,
-        compute_iv_skew,
-        save_gamma_index_snapshot,
-        load_gamma_index_history,
-        plot_price_with_gex_levels,
-        plot_gex_profile,
-        plot_gex_by_expiration,
-        plot_gamma_index_timeline,
-        plot_dex_profile,
-        plot_iv_skew,
-    )
-except ImportError as _imp_err:
-    import traceback as _tb
-    st.error(f"gamma_exposure import failed: {_imp_err}")
-    st.code(_tb.format_exc())
-    st.stop()
+from modules.gamma_exposure import (
+    compute_gex,
+    gex_flip_point,
+    total_gex_metrics,
+    compute_gamma_index,
+    compute_historical_gamma_proxy,
+    compute_dex,
+    total_dex_metrics,
+    compute_iv_skew,
+    save_gamma_index_snapshot,
+    load_gamma_index_history,
+    plot_price_with_gex_levels,
+    plot_gex_profile,
+    plot_gex_by_expiration,
+    plot_gamma_index_timeline,
+    plot_dex_profile,
+    plot_iv_skew,
+)
 from modules.vix_analysis import (
     compute_vix_metrics,
     plot_vix_panel,
