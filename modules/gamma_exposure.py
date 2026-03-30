@@ -1072,23 +1072,19 @@ def plot_gex_by_expiration(calls_df: pd.DataFrame, puts_df: pd.DataFrame,
     df = pd.DataFrame(rows).sort_values("Expiration")
 
     fig = go.Figure()
+
+    # Net GEX bars colored by sign
+    net_colors = ["#5FC97B" if v >= 0 else "#E85C5C" for v in df["Net GEX ($B)"]]
     fig.add_trace(go.Bar(
-        x=df["Expiration"], y=df["Call GEX ($B)"],
-        name="Call GEX", marker_color="#4C9BE8", opacity=0.8,
-    ))
-    fig.add_trace(go.Bar(
-        x=df["Expiration"], y=df["Put GEX ($B)"],
-        name="Put GEX", marker_color="#E85C5C", opacity=0.8,
-    ))
-    fig.add_trace(go.Scatter(
         x=df["Expiration"], y=df["Net GEX ($B)"],
-        name="Net GEX", mode="lines+markers",
-        line=dict(color="#F5E642", width=2),
+        name="Net GEX", marker_color=net_colors, opacity=0.85,
+        hovertemplate="%{x}<br>Net GEX: %{y:.2f}$B<extra></extra>",
     ))
 
+    fig.add_hline(y=0, line_dash="dash", line_color="rgba(255,255,255,0.3)")
+
     fig.update_layout(
-        barmode="relative",
-        title=f"{ticker} GEX by Expiration",
+        title=f"{ticker} Net GEX by Expiration",
         xaxis_title="Expiration",
         yaxis_title="GEX ($ Billions)",
         template="plotly_dark",
@@ -1124,28 +1120,19 @@ def plot_dex_by_expiration(calls_df: pd.DataFrame, puts_df: pd.DataFrame,
     df = pd.DataFrame(rows).sort_values("Expiration")
 
     fig = go.Figure()
+
+    # Net DEX bars colored by sign
+    net_colors = ["#5FC97B" if v >= 0 else "#E85C5C" for v in df["Net DEX (M)"]]
     fig.add_trace(go.Bar(
-        x=df["Expiration"], y=df["Call DEX (M)"],
-        name="Call DEX", marker_color="#4C9BE8", opacity=0.8,
-        hovertemplate="%{x}<br>Call DEX: %{y:.1f}M shares<extra></extra>",
-    ))
-    fig.add_trace(go.Bar(
-        x=df["Expiration"], y=df["Put DEX (M)"],
-        name="Put DEX", marker_color="#E85C5C", opacity=0.8,
-        hovertemplate="%{x}<br>Put DEX: %{y:.1f}M shares<extra></extra>",
-    ))
-    fig.add_trace(go.Scatter(
         x=df["Expiration"], y=df["Net DEX (M)"],
-        name="Net DEX", mode="lines+markers",
-        line=dict(color="#F5E642", width=2),
+        name="Net DEX", marker_color=net_colors, opacity=0.85,
         hovertemplate="%{x}<br>Net DEX: %{y:.1f}M shares<extra></extra>",
     ))
 
     fig.add_hline(y=0, line_dash="dash", line_color="rgba(255,255,255,0.3)")
 
     fig.update_layout(
-        barmode="relative",
-        title=f"{ticker} DEX by Expiration",
+        title=f"{ticker} Net DEX by Expiration",
         xaxis_title="Expiration",
         yaxis_title="DEX (Millions of Shares)",
         template="plotly_dark",
