@@ -11,6 +11,8 @@ Tables expected in Supabase:
   - price_cache          (cache_key → parquet bytes, updated_at timestamp)
 """
 
+from __future__ import annotations
+
 import io
 import base64
 import logging
