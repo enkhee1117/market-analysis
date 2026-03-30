@@ -52,6 +52,7 @@ from modules.gamma_exposure import (
     plot_gex_by_expiration,
     plot_gamma_index_timeline,
     plot_dex_profile,
+    plot_dex_by_expiration,
     plot_iv_skew,
 )
 from modules.vix_analysis import (
@@ -466,9 +467,15 @@ def _render_gex_tab():
                                view_mode=gex_view)
     st.plotly_chart(fig_gex, use_container_width=True)
 
-    st.subheader("GEX by Expiration")
-    fig_exp = plot_gex_by_expiration(calls_df, puts_df, spot, gex_ticker)
-    st.plotly_chart(fig_exp, use_container_width=True)
+    col_gex_exp, col_dex_exp = st.columns(2)
+    with col_gex_exp:
+        st.subheader("GEX by Expiration")
+        fig_exp = plot_gex_by_expiration(calls_df, puts_df, spot, gex_ticker)
+        st.plotly_chart(fig_exp, use_container_width=True)
+    with col_dex_exp:
+        st.subheader("DEX by Expiration")
+        fig_dex_exp = plot_dex_by_expiration(calls_df, puts_df, spot, gex_ticker)
+        st.plotly_chart(fig_dex_exp, use_container_width=True)
 
     st.markdown("---")
 

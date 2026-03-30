@@ -1099,6 +1099,63 @@ def plot_gex_by_expiration(calls_df: pd.DataFrame, puts_df: pd.DataFrame,
     return fig
 
 
+def plot_dex_by_expiration(calls_df: pd.DataFrame, puts_df: pd.DataFrame,
+                           spot: float, ticker: str) -> go.Figure:
+    """Bar chart of total net DEX per expiration date."""
+    if calls_df is None or calls_df.empty:
+        return go.Figure()
+
+    rows = []
+    for exp in calls_df["expiration"].unique():
+        c = calls_df[calls_df["expiration"] == exp]
+        p = puts_df[puts_df["expiration"] == exp] if puts_df is not None else pd.DataFrame()
+        d = compute_dex(c, p, spot)
+        if not d.empty:
+            rows.append({
+                "Expiration": exp,
+                "Call DEX (M)": d["call_dex_m"].sum(),
+                "Put DEX (M)":  d["put_dex_m"].sum(),
+                "Net DEX (M)":  d["net_dex_m"].sum(),
+            })
+
+    if not rows:
+        return go.Figure()
+
+    df = pd.DataFrame(rows).sort_values("Expiration")
+
+    fig = go.Figure()
+    fig.add_trace(go.Bar(
+        x=df["Expiration"], y=df["Call DEX (M)"],
+        name="Call DEX", marker_color="#4C9BE8", opacity=0.8,
+        hovertemplate="%{x}<br>Call DEX: %{y:.1f}M shares<extra></extra>",
+    ))
+    fig.add_trace(go.Bar(
+        x=df["Expiration"], y=df["Put DEX (M)"],
+        name="Put DEX", marker_color="#E85C5C", opacity=0.8,
+        hovertemplate="%{x}<br>Put DEX: %{y:.1f}M shares<extra></extra>",
+    ))
+    fig.add_trace(go.Scatter(
+        x=df["Expiration"], y=df["Net DEX (M)"],
+        name="Net DEX", mode="lines+markers",
+        line=dict(color="#F5E642", width=2),
+        hovertemplate="%{x}<br>Net DEX: %{y:.1f}M shares<extra></extra>",
+    ))
+
+    fig.add_hline(y=0, line_dash="dash", line_color="rgba(255,255,255,0.3)")
+
+    fig.update_layout(
+        barmode="relative",
+        title=f"{ticker} DEX by Expiration",
+        xaxis_title="Expiration",
+        yaxis_title="DEX (Millions of Shares)",
+        template="plotly_dark",
+        height=400,
+        legend=dict(orientation="h", y=1.05),
+        yaxis=dict(zeroline=True, zerolinecolor="rgba(255,255,255,0.4)"),
+    )
+    return fig
+
+
 def plot_dex_profile(dex_df: pd.DataFrame, spot: float, ticker: str,
                      strike_range_pct: float = 0.10) -> go.Figure:
     """
