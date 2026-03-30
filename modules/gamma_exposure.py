@@ -10,6 +10,8 @@ from scipy.stats import norm
 import os
 import json
 
+# Force Streamlit Cloud redeploy — module version 2026-03-29
+
 
 # ── Black-Scholes Gamma ───────────────────────────────────────────────────────
 
