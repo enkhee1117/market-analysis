@@ -1048,8 +1048,14 @@ def plot_gex_profile(gex_df: pd.DataFrame, spot: float, ticker: str,
 
 
 def plot_gex_by_expiration(calls_df: pd.DataFrame, puts_df: pd.DataFrame,
-                           spot: float, ticker: str) -> go.Figure:
-    """Bar chart of total net GEX per expiration date."""
+                           spot: float, ticker: str,
+                           max_months: int = 6) -> go.Figure:
+    """Bar chart of call GEX (up) and put GEX (down) per expiration date.
+
+    Args:
+        max_months: Only show expirations within this many months.
+                    Set to 0 to show all.
+    """
     if calls_df is None or calls_df.empty:
         return go.Figure()
 
@@ -1071,33 +1077,68 @@ def plot_gex_by_expiration(calls_df: pd.DataFrame, puts_df: pd.DataFrame,
 
     df = pd.DataFrame(rows).sort_values("Expiration")
 
+    # ── Trim to near-term expirations so bars are visible ──
+    if max_months > 0:
+        from datetime import timedelta
+        cutoff = (date.today() + timedelta(days=max_months * 30)).isoformat()
+        df = df[df["Expiration"] <= cutoff]
+        if df.empty:
+            df = pd.DataFrame(rows).sort_values("Expiration").head(12)
+
     fig = go.Figure()
 
-    # Net GEX bars colored by sign
-    net_colors = ["#5FC97B" if v >= 0 else "#E85C5C" for v in df["Net GEX ($B)"]]
+    # Call GEX bars (positive / upward)
     fig.add_trace(go.Bar(
-        x=df["Expiration"], y=df["Net GEX ($B)"],
-        name="Net GEX", marker_color=net_colors, opacity=0.85,
-        hovertemplate="%{x}<br>Net GEX: %{y:.2f}$B<extra></extra>",
+        x=df["Expiration"], y=df["Call GEX ($B)"],
+        name="Call GEX", marker_color="#4C9BE8", opacity=0.85,
+        hovertemplate="%{x}<br>Call GEX: %{y:.2f}$B<extra></extra>",
+    ))
+    # Put GEX bars (negative / downward)
+    fig.add_trace(go.Bar(
+        x=df["Expiration"], y=df["Put GEX ($B)"],
+        name="Put GEX", marker_color="#E85C5C", opacity=0.85,
+        hovertemplate="%{x}<br>Put GEX: %{y:.2f}$B<extra></extra>",
     ))
 
     fig.add_hline(y=0, line_dash="dash", line_color="rgba(255,255,255,0.3)")
 
+    # ── Smart y-axis range ──
+    all_vals = pd.concat([df["Call GEX ($B)"], df["Put GEX ($B)"]]).dropna()
+    if len(all_vals) > 2:
+        q1, q3 = all_vals.quantile(0.05), all_vals.quantile(0.95)
+        iqr = q3 - q1
+        y_lo = min(all_vals.min(), q1 - 1.5 * iqr)
+        y_hi = max(all_vals.max(), q3 + 1.5 * iqr)
+        pad = (y_hi - y_lo) * 0.1
+        y_range = [y_lo - pad, y_hi + pad]
+    else:
+        y_range = None
+
     fig.update_layout(
-        title=f"{ticker} Net GEX by Expiration",
+        barmode="relative",
+        title=f"{ticker} GEX by Expiration (next {max_months}mo)",
         xaxis_title="Expiration",
         yaxis_title="GEX ($ Billions)",
         template="plotly_dark",
         height=400,
         legend=dict(orientation="h", y=1.05),
-        yaxis=dict(zeroline=True, zerolinecolor="rgba(255,255,255,0.4)"),
+        yaxis=dict(
+            zeroline=True, zerolinecolor="rgba(255,255,255,0.4)",
+            range=y_range,
+        ),
     )
     return fig
 
 
 def plot_dex_by_expiration(calls_df: pd.DataFrame, puts_df: pd.DataFrame,
-                           spot: float, ticker: str) -> go.Figure:
-    """Bar chart of total net DEX per expiration date."""
+                           spot: float, ticker: str,
+                           max_months: int = 6) -> go.Figure:
+    """Bar chart of call DEX (up) and put DEX (down) per expiration date.
+
+    Args:
+        max_months: Only show expirations within this many months to keep
+                    the chart readable.  Set to 0 to show all.
+    """
     if calls_df is None or calls_df.empty:
         return go.Figure()
 
@@ -1119,26 +1160,55 @@ def plot_dex_by_expiration(calls_df: pd.DataFrame, puts_df: pd.DataFrame,
 
     df = pd.DataFrame(rows).sort_values("Expiration")
 
+    # ── Trim to near-term expirations so bars are visible ──
+    if max_months > 0:
+        from datetime import timedelta
+        cutoff = (date.today() + timedelta(days=max_months * 30)).isoformat()
+        df = df[df["Expiration"] <= cutoff]
+        if df.empty:
+            df = pd.DataFrame(rows).sort_values("Expiration").head(12)
+
     fig = go.Figure()
 
-    # Net DEX bars colored by sign
-    net_colors = ["#5FC97B" if v >= 0 else "#E85C5C" for v in df["Net DEX (M)"]]
+    # Call DEX bars (positive / upward)
     fig.add_trace(go.Bar(
-        x=df["Expiration"], y=df["Net DEX (M)"],
-        name="Net DEX", marker_color=net_colors, opacity=0.85,
-        hovertemplate="%{x}<br>Net DEX: %{y:.1f}M shares<extra></extra>",
+        x=df["Expiration"], y=df["Call DEX (M)"],
+        name="Call DEX", marker_color="#4C9BE8", opacity=0.85,
+        hovertemplate="%{x}<br>Call DEX: %{y:.1f}M shares<extra></extra>",
+    ))
+    # Put DEX bars (negative / downward)
+    fig.add_trace(go.Bar(
+        x=df["Expiration"], y=df["Put DEX (M)"],
+        name="Put DEX", marker_color="#E85C5C", opacity=0.85,
+        hovertemplate="%{x}<br>Put DEX: %{y:.1f}M shares<extra></extra>",
     ))
 
     fig.add_hline(y=0, line_dash="dash", line_color="rgba(255,255,255,0.3)")
 
+    # ── Smart y-axis range to avoid outlier squishing ──
+    all_vals = pd.concat([df["Call DEX (M)"], df["Put DEX (M)"]]).dropna()
+    if len(all_vals) > 2:
+        q1, q3 = all_vals.quantile(0.05), all_vals.quantile(0.95)
+        iqr = q3 - q1
+        y_lo = min(all_vals.min(), q1 - 1.5 * iqr)
+        y_hi = max(all_vals.max(), q3 + 1.5 * iqr)
+        pad = (y_hi - y_lo) * 0.1
+        y_range = [y_lo - pad, y_hi + pad]
+    else:
+        y_range = None
+
     fig.update_layout(
-        title=f"{ticker} Net DEX by Expiration",
+        barmode="relative",
+        title=f"{ticker} DEX by Expiration (next {max_months}mo)",
         xaxis_title="Expiration",
         yaxis_title="DEX (Millions of Shares)",
         template="plotly_dark",
         height=400,
         legend=dict(orientation="h", y=1.05),
-        yaxis=dict(zeroline=True, zerolinecolor="rgba(255,255,255,0.4)"),
+        yaxis=dict(
+            zeroline=True, zerolinecolor="rgba(255,255,255,0.4)",
+            range=y_range,
+        ),
     )
     return fig
 
