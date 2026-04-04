@@ -827,6 +827,7 @@ def _render_vix_tab():
                                        period=vix_period, interval="1d", refresh_bucket=_price_bucket)
         term_raw = fetch_multi_tickers(["^VIX9D", "^VIX", "^VIX3M", "^VIX6M", "^VIX1Y"],
                                        period="1mo", interval="1d", refresh_bucket=_price_bucket)
+        spy_hist = fetch_price_history(spy_ticker, period=vix_period, interval="1d", refresh_bucket=_price_bucket)
 
     if vix_raw.empty:
         st.error("Could not fetch VIX data.")
@@ -908,18 +909,18 @@ def _render_vix_tab():
     dashboard_caption(
         "Vol-of-vol relative to spot vol.",
         "VVIX divided by VIX with mean and standard-deviation bands.",
-        "High ratio can warn that options traders are paying up for convexity before spot vol jumps."
+        "High ratio can warn that options traders are paying up for convexity before spot vol jumps; SPY below helps line up price reaction."
     )
-    fig_ratio = plot_vvix_vix_ratio(vix_df)
+    fig_ratio = plot_vvix_vix_ratio(vix_df, spy_df=spy_hist, show_trendline=True)
     st.plotly_chart(fig_ratio, use_container_width=True)
 
     st.subheader("VIX Z-Score (20-Day Rolling)")
     dashboard_caption(
         "How stretched VIX is versus its recent regime.",
         "20-day rolling z-score of VIX.",
-        "Useful for spotting vol extremes, reversion setups, and panic/complacency conditions."
+        "Useful for spotting vol extremes, reversion setups, and panic/complacency conditions; SPY below shows the corresponding market move."
     )
-    fig_z = plot_vix_zscore(vix_df)
+    fig_z = plot_vix_zscore(vix_df, spy_df=spy_hist, show_trendline=True)
     st.plotly_chart(fig_z, use_container_width=True)
 
     with st.expander("VIX Regime Distribution"):

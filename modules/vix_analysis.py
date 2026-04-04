@@ -73,84 +73,42 @@ def _add_regime_shading(fig, vix_series: pd.Series, row: int = 1):
             )
 
 
-def plot_vix_panel(df: pd.DataFrame) -> go.Figure:
-    """
-    Multi-panel chart:
-    Row 1: VIX with regime shading + SVIX on secondary axis
-    Row 2: VVIX
-    """
-    has_vix  = "VIX"  in df.columns
-    has_vvix = "VVIX" in df.columns
-    has_svix = "SVIX" in df.columns
-
-    rows = 2 if has_vvix else 1
-    fig = make_subplots(
-        rows=rows, cols=1,
-        shared_xaxes=True,
-        row_heights=[0.6, 0.4] if rows == 2 else [1.0],
-        specs=[[{"secondary_y": True}]] + ([[{"secondary_y": False}]] if rows == 2 else []),
-        vertical_spacing=0.08,
-    )
-
-    # VIX
-    if has_vix:
-        fig.add_trace(go.Scatter(
-            x=df.index, y=df["VIX"],
-            name="VIX", mode="lines",
-            line=dict(color="#E85C5C", width=2),
-            hovertemplate="Date: %{x|%Y-%m-%d}<br>VIX: %{y:.2f}<extra></extra>",
-        ), row=1, col=1, secondary_y=False)
-
-        _add_regime_shading(fig, df["VIX"], row=1)
-
-        # Regime level lines
-        for lvl, color, label in [(15, "#F5E642", "15"), (20, "#F28C38", "20"), (30, "#E85C5C", "30")]:
-            fig.add_hline(y=lvl, line_dash="dot", line_color=color,
-                          line_width=1, opacity=0.5, row=1, col=1)
-
-    # SVIX on secondary y-axis
-    if has_svix:
-        fig.add_trace(go.Scatter(
-            x=df.index, y=df["SVIX"],
-            name="SVIX", mode="lines",
-            line=dict(color="#A575E8", width=1.5, dash="dot"),
-            opacity=0.8,
-            hovertemplate="Date: %{x|%Y-%m-%d}<br>SVIX: %{y:.2f}<extra></extra>",
-        ), row=1, col=1, secondary_y=True)
-
-    # VVIX
-    if has_vvix:
-        fig.add_trace(go.Scatter(
-            x=df.index, y=df["VVIX"],
-            name="VVIX", mode="lines",
-            line=dict(color="#4C9BE8", width=2),
-            hovertemplate="Date: %{x|%Y-%m-%d}<br>VVIX: %{y:.2f}<extra></extra>",
-        ), row=2, col=1)
-
-    fig.update_layout(
-        title="VIX / VVIX / SVIX Analysis",
-        template="plotly_dark",
-        height=600,
-        legend=dict(orientation="h", y=1.04),
-        hovermode="x unified",
-    )
-    fig.update_yaxes(title_text="VIX",  row=1, col=1, secondary_y=False)
-    fig.update_yaxes(title_text="SVIX", row=1, col=1, secondary_y=True)
-    if has_vvix:
-        fig.update_yaxes(title_text="VVIX", row=2, col=1)
-    return fig
+def _fit_trendline(series: pd.Series) -> pd.Series:
+    """Return a simple linear trendline fitted over the series."""
+    clean = series.dropna()
+    if len(clean) < 2:
+        return pd.Series(dtype=float)
+    x = np.arange(len(clean))
+    slope, intercept = np.polyfit(x, clean.values, 1)
+    return pd.Series(intercept + slope * x, index=clean.index)
 
 
-def plot_vvix_vix_ratio(df: pd.DataFrame) -> go.Figure:
-    """VVIX/VIX ratio with 1-std bands and highlighted extremes."""
+def _spy_close_series(spy_df: pd.DataFrame) -> pd.Series:
+    """Extract a close series from SPY OHLC data."""
+    if spy_df is None or spy_df.empty or "Close" not in spy_df.columns:
+        return pd.Series(dtype=float)
+    return spy_df["Close"].dropna().squeeze()
+
+
+def plot_vvix_vix_ratio(df: pd.DataFrame, spy_df: pd.DataFrame | None = None,
+                        show_trendline: bool = True) -> go.Figure:
+    """VVIX/VIX ratio with 1-std bands and optional SPY context panel."""
     if "VVIX_VIX_Ratio" not in df.columns:
         return go.Figure()
 
     ratio = df["VVIX_VIX_Ratio"].dropna()
     mean  = ratio.mean()
     std   = ratio.std()
+    spy_close = _spy_close_series(spy_df)
 
-    fig = go.Figure()
+    has_spy = not spy_close.empty
+    fig = make_subplots(
+        rows=2 if has_spy else 1,
+        cols=1,
+        shared_xaxes=True,
+        row_heights=[0.68, 0.32] if has_spy else [1.0],
+        vertical_spacing=0.08,
+    )
 
     # Bands
     x = ratio.index.tolist()
@@ -162,7 +120,7 @@ def plot_vvix_vix_ratio(df: pd.DataFrame) -> go.Figure:
         line=dict(color="rgba(0,0,0,0)"),
         name="±1 Std",
         showlegend=True,
-    ))
+    ), row=1, col=1)
 
     fig.add_trace(go.Scatter(
         x=ratio.index, y=ratio.values,
@@ -170,54 +128,139 @@ def plot_vvix_vix_ratio(df: pd.DataFrame) -> go.Figure:
         mode="lines",
         line=dict(color="#4C9BE8", width=2),
         hovertemplate="Date: %{x|%Y-%m-%d}<br>Ratio: %{y:.3f}<extra></extra>",
-    ))
+    ), row=1, col=1)
+
+    if show_trendline:
+        ratio_trend = _fit_trendline(ratio)
+        if not ratio_trend.empty:
+            fig.add_trace(go.Scatter(
+                x=ratio_trend.index, y=ratio_trend.values,
+                name="Ratio Trend",
+                mode="lines",
+                line=dict(color="#F5E642", width=2, dash="dash"),
+                hovertemplate="Date: %{x|%Y-%m-%d}<br>Trend: %{y:.3f}<extra></extra>",
+            ), row=1, col=1)
 
     fig.add_hline(y=mean,        line_dash="dash",  line_color="white",    line_width=1,
-                  annotation_text=f"Mean: {mean:.2f}", annotation_position="right")
-    fig.add_hline(y=mean + std,  line_dash="dot",   line_color="#4C9BE8",  line_width=1)
-    fig.add_hline(y=mean - std,  line_dash="dot",   line_color="#4C9BE8",  line_width=1)
+                  annotation_text=f"Mean: {mean:.2f}", annotation_position="right", row=1, col=1)
+    fig.add_hline(y=mean + std,  line_dash="dot",   line_color="#4C9BE8",  line_width=1, row=1, col=1)
+    fig.add_hline(y=mean - std,  line_dash="dot",   line_color="#4C9BE8",  line_width=1, row=1, col=1)
     fig.add_hline(y=mean + 2*std, line_dash="dot",  line_color="#F28C38",  line_width=1,
-                  annotation_text="+2σ", annotation_position="right")
+                  annotation_text="+2σ", annotation_position="right", row=1, col=1)
+
+    if has_spy:
+        spy_close = spy_close[spy_close.index.isin(ratio.index)]
+        if not spy_close.empty:
+            fig.add_trace(go.Scatter(
+                x=spy_close.index, y=spy_close.values,
+                name="SPY Close",
+                mode="lines",
+                line=dict(color="#5FC97B", width=2),
+                hovertemplate="Date: %{x|%Y-%m-%d}<br>SPY: %{y:.2f}<extra></extra>",
+            ), row=2, col=1)
+            if show_trendline:
+                spy_trend = _fit_trendline(spy_close)
+                if not spy_trend.empty:
+                    fig.add_trace(go.Scatter(
+                        x=spy_trend.index, y=spy_trend.values,
+                        name="SPY Trend",
+                        mode="lines",
+                        line=dict(color="rgba(95,201,123,0.8)", width=2, dash="dash"),
+                        hovertemplate="Date: %{x|%Y-%m-%d}<br>SPY Trend: %{y:.2f}<extra></extra>",
+                    ), row=2, col=1)
 
     fig.update_layout(
         title="VVIX/VIX Ratio (Vol-of-Vol Stress Indicator)",
-        xaxis_title="Date",
-        yaxis_title="VVIX / VIX",
         template="plotly_dark",
-        height=380,
+        height=520 if has_spy else 380,
+        hovermode="x unified",
+        legend=dict(orientation="h", y=1.08),
     )
+    fig.update_yaxes(title_text="VVIX / VIX", row=1, col=1)
+    if has_spy:
+        fig.update_yaxes(title_text="SPY", row=2, col=1)
+        fig.update_xaxes(title_text="Date", row=2, col=1)
+    else:
+        fig.update_xaxes(title_text="Date", row=1, col=1)
     return fig
 
 
-def plot_vix_zscore(df: pd.DataFrame) -> go.Figure:
-    """VIX 20-day rolling z-score."""
+def plot_vix_zscore(df: pd.DataFrame, spy_df: pd.DataFrame | None = None,
+                    show_trendline: bool = True) -> go.Figure:
+    """VIX 20-day rolling z-score with optional SPY context panel."""
     if "VIX_ZScore_20d" not in df.columns:
         return go.Figure()
 
     z = df["VIX_ZScore_20d"].dropna()
+    spy_close = _spy_close_series(spy_df)
 
     colors = ["#E85C5C" if v > 1.5 else "#5FC97B" if v < -1.5 else "#4C9BE8" for v in z]
 
-    fig = go.Figure()
+    has_spy = not spy_close.empty
+    fig = make_subplots(
+        rows=2 if has_spy else 1,
+        cols=1,
+        shared_xaxes=True,
+        row_heights=[0.65, 0.35] if has_spy else [1.0],
+        vertical_spacing=0.08,
+    )
     fig.add_trace(go.Bar(
         x=z.index, y=z.values,
         name="VIX Z-Score (20d)",
         marker_color=colors,
         hovertemplate="Date: %{x|%Y-%m-%d}<br>Z-Score: %{y:.2f}<extra></extra>",
-    ))
+    ), row=1, col=1)
+
+    if show_trendline:
+        z_trend = _fit_trendline(z)
+        if not z_trend.empty:
+            fig.add_trace(go.Scatter(
+                x=z_trend.index, y=z_trend.values,
+                name="Z-Score Trend",
+                mode="lines",
+                line=dict(color="#F5E642", width=2, dash="dash"),
+                hovertemplate="Date: %{x|%Y-%m-%d}<br>Trend: %{y:.2f}<extra></extra>",
+            ), row=1, col=1)
 
     for lvl, color, label in [(2, "#E85C5C", "+2σ"), (-2, "#5FC97B", "-2σ"),
                                (1, "#F28C38", "+1σ"), (-1, "#F5E642", "-1σ")]:
         fig.add_hline(y=lvl, line_dash="dot", line_color=color, line_width=1,
-                      annotation_text=label, annotation_position="right")
+                      annotation_text=label, annotation_position="right", row=1, col=1)
+
+    if has_spy:
+        spy_close = spy_close[spy_close.index.isin(z.index)]
+        if not spy_close.empty:
+            fig.add_trace(go.Scatter(
+                x=spy_close.index, y=spy_close.values,
+                name="SPY Close",
+                mode="lines",
+                line=dict(color="#5FC97B", width=2),
+                hovertemplate="Date: %{x|%Y-%m-%d}<br>SPY: %{y:.2f}<extra></extra>",
+            ), row=2, col=1)
+            if show_trendline:
+                spy_trend = _fit_trendline(spy_close)
+                if not spy_trend.empty:
+                    fig.add_trace(go.Scatter(
+                        x=spy_trend.index, y=spy_trend.values,
+                        name="SPY Trend",
+                        mode="lines",
+                        line=dict(color="rgba(95,201,123,0.8)", width=2, dash="dash"),
+                        hovertemplate="Date: %{x|%Y-%m-%d}<br>SPY Trend: %{y:.2f}<extra></extra>",
+                    ), row=2, col=1)
 
     fig.update_layout(
         title="VIX 20-Day Rolling Z-Score (Overbought/Oversold Vol)",
-        xaxis_title="Date",
-        yaxis_title="Z-Score",
         template="plotly_dark",
-        height=380,
+        height=520 if has_spy else 380,
+        hovermode="x unified",
+        legend=dict(orientation="h", y=1.08),
     )
+    fig.update_yaxes(title_text="Z-Score", row=1, col=1)
+    if has_spy:
+        fig.update_yaxes(title_text="SPY", row=2, col=1)
+        fig.update_xaxes(title_text="Date", row=2, col=1)
+    else:
+        fig.update_xaxes(title_text="Date", row=1, col=1)
     return fig
 
 

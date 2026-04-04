@@ -101,13 +101,14 @@ def test_vix_analysis_exports():
         plot_vvix_vix_ratio,
         plot_vix_zscore,
         plot_vix_term_structure_curve,
-        plot_correlation_matrix,
         vix_summary_stats,
     )
     assert callable(compute_vix_metrics)
     assert callable(compute_vix_term_structure_snapshot)
+    assert callable(plot_vvix_vix_ratio)
+    assert callable(plot_vix_zscore)
     assert callable(plot_vix_term_structure_curve)
-    assert callable(plot_correlation_matrix)
+    assert callable(vix_summary_stats)
 
 
 def test_seasonality_exports():

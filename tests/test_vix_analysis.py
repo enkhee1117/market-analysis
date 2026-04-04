@@ -14,6 +14,8 @@ import plotly.graph_objects as go
 from modules.vix_analysis import (
     compute_vix_metrics,
     compute_vix_term_structure_snapshot,
+    plot_vvix_vix_ratio,
+    plot_vix_zscore,
     plot_vix_term_structure_curve,
 )
 
@@ -75,3 +77,29 @@ def test_plot_vix_term_structure_curve_returns_figure():
 def test_plot_vix_term_structure_curve_empty_when_no_columns():
     fig = plot_vix_term_structure_curve(pd.DataFrame({"VIX": []}))
     assert isinstance(fig, go.Figure)
+
+
+def test_plot_vvix_vix_ratio_with_spy_context_returns_figure():
+    dates = pd.bdate_range("2026-01-01", periods=40)
+    df = pd.DataFrame({
+        "VIX": np.linspace(14, 22, 40),
+        "VVIX": np.linspace(85, 120, 40),
+    }, index=dates)
+    df = compute_vix_metrics(df)
+    spy = pd.DataFrame({"Close": np.linspace(580, 610, 40)}, index=dates)
+    fig = plot_vvix_vix_ratio(df, spy_df=spy, show_trendline=True)
+    assert isinstance(fig, go.Figure)
+    assert len(fig.data) >= 4
+
+
+def test_plot_vix_zscore_with_spy_context_returns_figure():
+    dates = pd.bdate_range("2026-01-01", periods=40)
+    df = pd.DataFrame({
+        "VIX": np.linspace(14, 24, 40) + np.sin(np.linspace(0, 6, 40)),
+        "VVIX": np.linspace(85, 120, 40),
+    }, index=dates)
+    df = compute_vix_metrics(df)
+    spy = pd.DataFrame({"Close": np.linspace(580, 610, 40)}, index=dates)
+    fig = plot_vix_zscore(df, spy_df=spy, show_trendline=True)
+    assert isinstance(fig, go.Figure)
+    assert len(fig.data) >= 3
