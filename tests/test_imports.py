@@ -63,6 +63,7 @@ def test_gamma_exposure_exports():
         compute_dex,
         total_dex_metrics,
         compute_iv_skew,
+        compute_atm_iv_term_structure,
         filter_options_chain,
         summarize_chain_quality,
         aggregate_gex_by_expiration,
@@ -75,15 +76,17 @@ def test_gamma_exposure_exports():
         plot_dex_profile,
         plot_dex_by_expiration,
         plot_iv_skew,
+        plot_atm_iv_term_structure,
     )
     # Verify all are callable
     for fn in (compute_gex, gex_flip_point, total_gex_metrics, compute_gamma_index,
                compute_dex, total_dex_metrics,
-               compute_iv_skew, filter_options_chain, summarize_chain_quality,
+               compute_iv_skew, compute_atm_iv_term_structure,
+               filter_options_chain, summarize_chain_quality,
                aggregate_gex_by_expiration, save_gamma_index_snapshot, load_gamma_index_history,
                plot_price_with_gex_levels, plot_gex_profile, plot_gex_by_expiration,
                plot_gamma_index_timeline, plot_dex_profile, plot_dex_by_expiration,
-               plot_iv_skew):
+               plot_iv_skew, plot_atm_iv_term_structure):
         assert callable(fn), f"{fn.__name__} is not callable"
 
 
@@ -91,15 +94,17 @@ def test_vix_analysis_exports():
     """Must match: from modules.vix_analysis import ... in app.py"""
     from modules.vix_analysis import (
         compute_vix_metrics,
+        compute_vix_term_structure_snapshot,
         plot_vix_panel,
         plot_vvix_vix_ratio,
         plot_vix_zscore,
-        plot_vix_term_structure_proxy,
+        plot_vix_term_structure_curve,
         plot_correlation_matrix,
         vix_summary_stats,
     )
     assert callable(compute_vix_metrics)
-    assert callable(plot_vix_term_structure_proxy)
+    assert callable(compute_vix_term_structure_snapshot)
+    assert callable(plot_vix_term_structure_curve)
     assert callable(plot_correlation_matrix)
 
 

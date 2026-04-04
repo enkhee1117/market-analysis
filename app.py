@@ -45,6 +45,7 @@ from modules.gamma_exposure import (
     compute_dex,
     total_dex_metrics,
     compute_iv_skew,
+    compute_atm_iv_term_structure,
     filter_options_chain,
     summarize_chain_quality,
     aggregate_gex_by_expiration,
@@ -57,13 +58,15 @@ from modules.gamma_exposure import (
     plot_dex_profile,
     plot_dex_by_expiration,
     plot_iv_skew,
+    plot_atm_iv_term_structure,
 )
 from modules.vix_analysis import (
     compute_vix_metrics,
+    compute_vix_term_structure_snapshot,
     plot_vix_panel,
     plot_vvix_vix_ratio,
     plot_vix_zscore,
-    plot_vix_term_structure_proxy,
+    plot_vix_term_structure_curve,
     plot_correlation_matrix,
     vix_summary_stats,
 )
@@ -645,6 +648,46 @@ def _render_gex_tab():
 
     st.markdown("---")
 
+    st.subheader("ATM IV Term Structure")
+    with st.spinner("Building ATM IV term structure..."):
+        atm_term_df = compute_atm_iv_term_structure(
+            raw_calls_df,
+            raw_puts_df,
+            spot,
+            min_open_interest=min_open_interest,
+            min_volume=min_volume,
+        )
+
+    if not atm_term_df.empty:
+        front = atm_term_df.iloc[0]
+        back = atm_term_df.iloc[-1]
+        nearest_30 = atm_term_df.loc[(atm_term_df["dte"] - 30).abs().idxmin()]
+        term_cols = st.columns(4)
+        with term_cols[0]:
+            colored_metric("Front ATM IV", f"{front['atm_iv'] * 100:.1f}%",
+                           sub=f"{int(front['dte'])} DTE")
+        with term_cols[1]:
+            colored_metric("30D ATM IV", f"{nearest_30['atm_iv'] * 100:.1f}%",
+                           sub=f"{int(nearest_30['dte'])} DTE nearest")
+        with term_cols[2]:
+            colored_metric("Back ATM IV", f"{back['atm_iv'] * 100:.1f}%",
+                           sub=f"{int(back['dte'])} DTE")
+        with term_cols[3]:
+            slope_pp = (back["atm_iv"] - front["atm_iv"]) * 100
+            colored_metric("Front → Back Slope", f"{slope_pp:+.1f} pts",
+                           sub="average ATM IV")
+
+        st.caption(
+            "Built from the nearest-to-spot strike at each future expiration across the full chain. "
+            "This view ignores the exact-expiration selector so you can see the whole curve."
+        )
+        fig_atm_term = plot_atm_iv_term_structure(atm_term_df, gex_ticker)
+        st.plotly_chart(fig_atm_term, use_container_width=True)
+    else:
+        st.info("ATM IV term structure unavailable — not enough future expirations met the liquidity filters.")
+
+    st.markdown("---")
+
     # ── Raw GEX data + export ────────────────────────────────────────────
     lo = spot * (1 - moneyness_pct)
     hi = spot * (1 + moneyness_pct)
@@ -737,6 +780,8 @@ def _render_vix_tab():
     with st.spinner("Fetching VIX / VVIX / SVIX data..."):
         vix_raw = fetch_multi_tickers(["^VIX", "^VVIX", "SVIX"],
                                        period=vix_period, interval="1d", refresh_bucket=_price_bucket)
+        term_raw = fetch_multi_tickers(["^VIX9D", "^VIX", "^VIX3M", "^VIX6M", "^VIX1Y"],
+                                       period="1mo", interval="1d", refresh_bucket=_price_bucket)
         spy_hist = fetch_price_history(spy_ticker, period=vix_period, interval="1d", refresh_bucket=_price_bucket)
 
     if vix_raw.empty:
@@ -745,8 +790,16 @@ def _render_vix_tab():
 
     rename_map = {"^VIX": "VIX", "^VVIX": "VVIX", "SVIX": "SVIX"}
     vix_raw = vix_raw.rename(columns={k: v for k, v in rename_map.items() if k in vix_raw.columns})
+    term_raw = term_raw.rename(columns={
+        "^VIX9D": "VIX9D",
+        "^VIX": "VIX",
+        "^VIX3M": "VIX3M",
+        "^VIX6M": "VIX6M",
+        "^VIX1Y": "VIX1Y",
+    })
 
     vix_df = compute_vix_metrics(vix_raw)
+    term_snapshot, term_summary = compute_vix_term_structure_snapshot(term_raw)
     stats  = vix_summary_stats(vix_df)
 
     if stats:
@@ -779,9 +832,39 @@ def _render_vix_tab():
         fig_z = plot_vix_zscore(vix_df)
         st.plotly_chart(fig_z, use_container_width=True)
 
-    st.subheader("VIX Momentum / Term Structure Proxy")
-    fig_ts = plot_vix_term_structure_proxy(vix_df)
+    st.subheader("VIX Term Structure")
+    if term_summary:
+        tc = st.columns(4)
+        with tc[0]:
+            colored_metric("Regime", term_summary.get("regime", "N/A"),
+                           sub=f"{pd.to_datetime(term_summary['current_date']).strftime('%Y-%m-%d')}")
+        with tc[1]:
+            slope = term_summary.get("slope_1m_3m")
+            colored_metric("1M → 3M Slope", f"{slope:+.2f}" if slope is not None else "N/A",
+                           sub="positive = contango")
+        with tc[2]:
+            colored_metric("1M Index", f"{term_summary['front_month']:.2f}" if term_summary.get("front_month") is not None else "N/A",
+                           sub="spot VIX")
+        with tc[3]:
+            colored_metric("Curve Inversions", term_summary.get("inversion_count", 0),
+                           sub="downward tenor steps")
+    fig_ts = plot_vix_term_structure_curve(term_raw)
     st.plotly_chart(fig_ts, use_container_width=True)
+
+    with st.expander("Current Term Structure Table"):
+        if not term_snapshot.empty:
+            display = term_snapshot[["Tenor", "Current", "Previous", "Premium vs 1M %"]].copy()
+            st.dataframe(
+                display.style.format({
+                    "Current": "{:.2f}",
+                    "Previous": "{:.2f}",
+                    "Premium vs 1M %": "{:+.1f}",
+                }),
+                use_container_width=True,
+                hide_index=True,
+            )
+        else:
+            st.info("Term-structure index data unavailable.")
 
     st.subheader("Correlation Matrix")
     fig_corr = plot_correlation_matrix(vix_df, spy_hist)

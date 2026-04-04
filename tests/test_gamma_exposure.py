@@ -27,6 +27,7 @@ from modules.gamma_exposure import (
     gex_flip_point,
     total_gex_metrics,
     compute_iv_skew,
+    compute_atm_iv_term_structure,
     filter_options_chain,
     summarize_chain_quality,
     aggregate_gex_by_expiration,
@@ -970,6 +971,7 @@ def test_iv_skew_empty():
 # ── DEX + IV Skew Chart Functions ────────────────────────────────────────────
 
 from modules.gamma_exposure import plot_dex_profile, plot_iv_skew
+from modules.gamma_exposure import plot_atm_iv_term_structure
 
 
 def test_plot_dex_profile_returns_figure(options_dfs):
@@ -993,4 +995,66 @@ def test_plot_iv_skew_returns_figure(options_dfs):
 
 def test_plot_iv_skew_empty():
     fig = plot_iv_skew(pd.DataFrame(), 400.0, "SPY")
+    assert isinstance(fig, go.Figure)
+
+
+def test_compute_atm_iv_term_structure_returns_sorted_expiries():
+    spot = 400.0
+    calls = pd.DataFrame({
+        "strike": [395.0, 400.0, 405.0, 400.0, 405.0],
+        "impliedVolatility": [0.22, 0.20, 0.23, 0.24, 0.25],
+        "openInterest": [1000, 1200, 900, 1400, 800],
+        "volume": [50, 75, 20, 60, 15],
+        "expiration": ["2027-06-18", "2027-06-18", "2027-06-18", "2027-07-16", "2027-07-16"],
+    })
+    puts = pd.DataFrame({
+        "strike": [395.0, 400.0, 405.0, 400.0, 405.0],
+        "impliedVolatility": [0.24, 0.21, 0.25, 0.26, 0.27],
+        "openInterest": [1000, 1200, 900, 1400, 800],
+        "volume": [50, 75, 20, 60, 15],
+        "expiration": ["2027-06-18", "2027-06-18", "2027-06-18", "2027-07-16", "2027-07-16"],
+    })
+    term = compute_atm_iv_term_structure(calls, puts, spot, min_open_interest=500)
+    assert not term.empty
+    assert list(term["expiration"]) == sorted(term["expiration"].tolist())
+    assert "atm_iv" in term.columns
+    assert term["dte"].is_monotonic_increasing
+
+
+def test_compute_atm_iv_term_structure_uses_nearest_strike():
+    spot = 400.0
+    calls = pd.DataFrame({
+        "strike": [390.0, 400.0, 410.0],
+        "impliedVolatility": [0.30, 0.20, 0.28],
+        "openInterest": [1000, 1000, 1000],
+        "expiration": ["2027-06-18"] * 3,
+    })
+    puts = pd.DataFrame({
+        "strike": [390.0, 400.0, 410.0],
+        "impliedVolatility": [0.32, 0.22, 0.31],
+        "openInterest": [1000, 1000, 1000],
+        "expiration": ["2027-06-18"] * 3,
+    })
+    term = compute_atm_iv_term_structure(calls, puts, spot)
+    assert not term.empty
+    np.testing.assert_allclose(term["atm_strike"].iloc[0], 400.0, atol=1e-9)
+    np.testing.assert_allclose(term["atm_iv"].iloc[0], 0.21, atol=1e-9)
+
+
+def test_plot_atm_iv_term_structure_returns_figure():
+    term = pd.DataFrame({
+        "expiration": ["2027-06-18", "2027-07-16"],
+        "dte": [10, 38],
+        "call_atm_iv": [0.20, 0.24],
+        "put_atm_iv": [0.22, 0.26],
+        "atm_iv": [0.21, 0.25],
+        "atm_strike": [400.0, 400.0],
+    })
+    fig = plot_atm_iv_term_structure(term, "SPY")
+    assert isinstance(fig, go.Figure)
+    assert len(fig.data) >= 1
+
+
+def test_plot_atm_iv_term_structure_empty():
+    fig = plot_atm_iv_term_structure(pd.DataFrame(), "SPY")
     assert isinstance(fig, go.Figure)

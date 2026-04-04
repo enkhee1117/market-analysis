@@ -455,6 +455,86 @@ def compute_iv_skew(calls_df: pd.DataFrame, puts_df: pd.DataFrame,
     return merged
 
 
+def compute_atm_iv_term_structure(
+    calls_df: pd.DataFrame,
+    puts_df: pd.DataFrame,
+    spot: float,
+    min_open_interest: int = 0,
+    min_volume: int = 0,
+) -> pd.DataFrame:
+    """
+    Build an ATM IV term structure across expirations.
+
+    For each future expiration, select the strike nearest to spot and compute:
+    - call_atm_iv
+    - put_atm_iv
+    - atm_iv (average of call and put when both exist)
+    """
+    if spot is None or spot <= 0:
+        return pd.DataFrame()
+
+    def _prep(df: pd.DataFrame | None, side: str) -> pd.DataFrame:
+        d = _normalize_options_df(df)
+        if d.empty or "expiration" not in d.columns or "strike" not in d.columns:
+            return pd.DataFrame()
+        if "impliedvolatility" not in d.columns:
+            return pd.DataFrame()
+
+        d = d.dropna(subset=["expiration", "strike", "impliedvolatility"]).copy()
+        d = d[d["impliedvolatility"] > 0.001]
+        d["_dte"] = d["expiration"].map(_expiration_dte)
+        d = d[d["_dte"].notna()]
+        d = d[d["_dte"] > 0]
+
+        oi_col = _option_oi_col(d)
+        if oi_col and min_open_interest > 0:
+            d = d[d[oi_col].fillna(0) >= min_open_interest]
+        if "volume" in d.columns and min_volume > 0:
+            d = d[d["volume"].fillna(0) >= min_volume]
+
+        if d.empty:
+            return pd.DataFrame()
+
+        d["_distance"] = (d["strike"] - spot).abs()
+        rows = []
+        for exp, sub in d.groupby("expiration"):
+            nearest = sub["_distance"].min()
+            atm = sub[sub["_distance"] == nearest].copy()
+            if atm.empty:
+                continue
+            # If both upper/lower strikes tie, average them.
+            iv = float(atm["impliedvolatility"].mean())
+            strike = float(atm["strike"].mean())
+            dte = int(atm["_dte"].iloc[0])
+            rows.append({
+                "expiration": exp,
+                "dte": dte,
+                f"{side}_atm_iv": iv,
+                f"{side}_atm_strike": strike,
+            })
+        return pd.DataFrame(rows)
+
+    call_term = _prep(calls_df, "call")
+    put_term = _prep(puts_df, "put")
+
+    if call_term.empty and put_term.empty:
+        return pd.DataFrame()
+
+    if not call_term.empty and not put_term.empty:
+        merged = pd.merge(call_term, put_term, on=["expiration", "dte"], how="outer")
+    elif not call_term.empty:
+        merged = call_term.copy()
+    else:
+        merged = put_term.copy()
+
+    merged["atm_iv"] = merged[[c for c in ("call_atm_iv", "put_atm_iv") if c in merged.columns]].mean(axis=1)
+    strike_cols = [c for c in ("call_atm_strike", "put_atm_strike") if c in merged.columns]
+    if strike_cols:
+        merged["atm_strike"] = merged[strike_cols].mean(axis=1)
+    merged["iv_slope_from_front"] = (merged["atm_iv"] - merged["atm_iv"].iloc[0]) * 100 if not merged.empty else np.nan
+    return merged.sort_values(["dte", "expiration"]).reset_index(drop=True)
+
+
 def aggregate_gex_by_expiration(calls_df: pd.DataFrame, puts_df: pd.DataFrame,
                                 spot: float) -> pd.DataFrame:
     """Return per-expiration GEX totals as a DataFrame."""
@@ -1421,4 +1501,65 @@ def plot_iv_skew(iv_df: pd.DataFrame, spot: float, ticker: str,
                      zerolinecolor="rgba(255,255,255,0.3)", row=2, col=1)
     fig.update_xaxes(title_text="Strike Price", row=2, col=1)
 
+    return fig
+
+
+def plot_atm_iv_term_structure(term_df: pd.DataFrame, ticker: str) -> go.Figure:
+    """Plot ATM IV across expirations to show the options term structure."""
+    if term_df.empty:
+        fig = go.Figure()
+        fig.update_layout(title=f"No ATM IV term structure for {ticker}", template="plotly_dark")
+        return fig
+
+    fig = go.Figure()
+
+    def _customdata(frame: pd.DataFrame, strike_col: str) -> np.ndarray:
+        strike_vals = frame[strike_col] if strike_col in frame.columns else pd.Series(np.nan, index=frame.index)
+        return np.column_stack([frame["expiration"].astype(str).values, strike_vals.values])
+
+    if "call_atm_iv" in term_df.columns and term_df["call_atm_iv"].notna().any():
+        calls = term_df.dropna(subset=["call_atm_iv"])
+        fig.add_trace(go.Scatter(
+            x=calls["dte"], y=calls["call_atm_iv"] * 100,
+            mode="lines+markers",
+            name="Call ATM IV",
+            line=dict(color="#4C9BE8", width=2),
+            marker=dict(size=7),
+            customdata=_customdata(calls, "call_atm_strike"),
+            hovertemplate="DTE: %{x}<br>Expiration: %{customdata[0]}<br>Call ATM IV: %{y:.1f}%<br>ATM Strike: %{customdata[1]:.1f}<extra></extra>",
+        ))
+
+    if "put_atm_iv" in term_df.columns and term_df["put_atm_iv"].notna().any():
+        puts = term_df.dropna(subset=["put_atm_iv"])
+        fig.add_trace(go.Scatter(
+            x=puts["dte"], y=puts["put_atm_iv"] * 100,
+            mode="lines+markers",
+            name="Put ATM IV",
+            line=dict(color="#E85C5C", width=2),
+            marker=dict(size=7),
+            customdata=_customdata(puts, "put_atm_strike"),
+            hovertemplate="DTE: %{x}<br>Expiration: %{customdata[0]}<br>Put ATM IV: %{y:.1f}%<br>ATM Strike: %{customdata[1]:.1f}<extra></extra>",
+        ))
+
+    avg = term_df.dropna(subset=["atm_iv"])
+    fig.add_trace(go.Scatter(
+        x=avg["dte"], y=avg["atm_iv"] * 100,
+        mode="lines+markers",
+        name="Average ATM IV",
+        line=dict(color="#F5E642", width=3),
+        marker=dict(size=8, symbol="diamond"),
+        customdata=_customdata(avg, "atm_strike"),
+        hovertemplate="DTE: %{x}<br>Expiration: %{customdata[0]}<br>ATM IV: %{y:.1f}%<br>ATM Strike: %{customdata[1]:.1f}<extra></extra>",
+    ))
+
+    fig.update_layout(
+        title=f"{ticker} ATM IV Term Structure",
+        xaxis_title="Days to Expiration",
+        yaxis_title="Implied Volatility (%)",
+        template="plotly_dark",
+        height=430,
+        legend=dict(orientation="h", y=1.06),
+        hovermode="x unified",
+    )
+    fig.update_xaxes(tickmode="linear")
     return fig
