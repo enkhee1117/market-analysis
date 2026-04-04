@@ -904,26 +904,23 @@ def _render_vix_tab():
         else:
             st.info("Term-structure index data unavailable.")
 
-    col_v1, col_v2 = st.columns(2)
-    with col_v1:
-        st.subheader("VVIX / VIX Ratio")
-        dashboard_caption(
-            "Vol-of-vol relative to spot vol.",
-            "VVIX divided by VIX with mean and standard-deviation bands.",
-            "High ratio can warn that options traders are paying up for convexity before spot vol jumps."
-        )
-        fig_ratio = plot_vvix_vix_ratio(vix_df)
-        st.plotly_chart(fig_ratio, use_container_width=True)
+    st.subheader("VVIX / VIX Ratio")
+    dashboard_caption(
+        "Vol-of-vol relative to spot vol.",
+        "VVIX divided by VIX with mean and standard-deviation bands.",
+        "High ratio can warn that options traders are paying up for convexity before spot vol jumps."
+    )
+    fig_ratio = plot_vvix_vix_ratio(vix_df)
+    st.plotly_chart(fig_ratio, use_container_width=True)
 
-    with col_v2:
-        st.subheader("VIX Z-Score (20-Day Rolling)")
-        dashboard_caption(
-            "How stretched VIX is versus its recent regime.",
-            "20-day rolling z-score of VIX.",
-            "Useful for spotting vol extremes, reversion setups, and panic/complacency conditions."
-        )
-        fig_z = plot_vix_zscore(vix_df)
-        st.plotly_chart(fig_z, use_container_width=True)
+    st.subheader("VIX Z-Score (20-Day Rolling)")
+    dashboard_caption(
+        "How stretched VIX is versus its recent regime.",
+        "20-day rolling z-score of VIX.",
+        "Useful for spotting vol extremes, reversion setups, and panic/complacency conditions."
+    )
+    fig_z = plot_vix_zscore(vix_df)
+    st.plotly_chart(fig_z, use_container_width=True)
 
     with st.expander("VIX Regime Distribution"):
         st.caption("What: Time spent in low, moderate, elevated, and high-vol regimes | Calc: count of days in each VIX bucket | Use: sets expectations for how unusual the current regime is.")
