@@ -65,7 +65,6 @@ from modules.gamma_exposure import (
 from modules.vix_analysis import (
     compute_vix_metrics,
     compute_vix_term_structure_snapshot,
-    plot_vix_panel,
     plot_vvix_vix_ratio,
     plot_vix_zscore,
     plot_vix_term_structure_curve,
@@ -870,16 +869,6 @@ def _render_vix_tab():
             chg = stats.get("1d_chg")
             colored_metric("1D Change", f"{chg:+.2f}%" if chg is not None else "N/A",
                            positive_is_good=False)
-
-    st.markdown("---")
-
-    fig_vix = plot_vix_panel(vix_df)
-    dashboard_caption(
-        "Main volatility tape: VIX, VVIX, and SVIX together.",
-        "Raw index levels over time with VIX regime shading.",
-        "Shows whether vol is stable, accelerating, or being faded."
-    )
-    st.plotly_chart(fig_vix, use_container_width=True)
 
     col_v1, col_v2 = st.columns(2)
     with col_v1:

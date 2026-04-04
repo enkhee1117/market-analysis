@@ -98,7 +98,6 @@ def test_vix_analysis_exports():
     from modules.vix_analysis import (
         compute_vix_metrics,
         compute_vix_term_structure_snapshot,
-        plot_vix_panel,
         plot_vvix_vix_ratio,
         plot_vix_zscore,
         plot_vix_term_structure_curve,
