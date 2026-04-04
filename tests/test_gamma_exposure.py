@@ -26,6 +26,10 @@ from modules.gamma_exposure import (
     compute_gex,
     gex_flip_point,
     total_gex_metrics,
+    compute_iv_skew,
+    filter_options_chain,
+    summarize_chain_quality,
+    aggregate_gex_by_expiration,
     plot_gex_profile,
     plot_gex_by_expiration,
 )
@@ -485,6 +489,85 @@ def test_plot_gex_by_expiration_returns_figure(options_dfs):
     assert isinstance(fig, go.Figure)
 
 
+def test_compute_iv_skew_respects_selected_expiration():
+    spot = 400.0
+    calls = pd.DataFrame({
+        "strike": [390.0, 400.0, 390.0, 400.0],
+        "impliedVolatility": [0.20, 0.21, 0.30, 0.31],
+        "expiration": ["2027-06-18", "2027-06-18", "2027-07-16", "2027-07-16"],
+    })
+    puts = pd.DataFrame({
+        "strike": [390.0, 400.0, 390.0, 400.0],
+        "impliedVolatility": [0.24, 0.25, 0.34, 0.35],
+        "expiration": ["2027-06-18", "2027-06-18", "2027-07-16", "2027-07-16"],
+    })
+    iv = compute_iv_skew(calls, puts, spot, expiration="2027-07-16")
+    assert not iv.empty
+    np.testing.assert_allclose(iv["call_iv"].mean(), 0.305, atol=1e-9)
+
+
+def test_filter_options_chain_applies_moneyness_and_liquidity():
+    spot = 400.0
+    calls = pd.DataFrame({
+        "strike": [360.0, 395.0, 405.0],
+        "openInterest": [500, 25, 600],
+        "volume": [10, 100, 0],
+        "gamma": [0.01, 0.01, 0.01],
+        "expiration": ["2027-06-18"] * 3,
+    })
+    puts = pd.DataFrame({
+        "strike": [395.0, 410.0],
+        "openInterest": [800, 900],
+        "volume": [50, 50],
+        "gamma": [0.01, 0.01],
+        "expiration": ["2027-06-18"] * 2,
+    })
+    fc, fp, meta = filter_options_chain(
+        calls, puts, spot,
+        moneyness_pct=0.03,
+        min_open_interest=100,
+        min_volume=10,
+    )
+    assert fc.empty
+    assert set(fp["strike"].tolist()) == {395.0, 410.0}
+    assert meta["kept_contracts"] == 2
+
+
+def test_summarize_chain_quality_returns_label():
+    quality = summarize_chain_quality(
+        "SPY",
+        "Massive.com",
+        {
+            "kept_contracts": 200,
+            "kept_ratio": 0.35,
+            "expiration_count": 4,
+            "gamma_coverage": 0.9,
+            "total_open_interest": 250000,
+        },
+    )
+    assert quality["label"] in {"High", "Medium", "Low"}
+    assert 0 <= quality["score"] <= 1
+
+
+def test_aggregate_gex_by_expiration_returns_dataframe():
+    spot = 400.0
+    calls = pd.DataFrame({
+        "strike": [400.0, 400.0],
+        "gamma": [0.02, 0.01],
+        "openInterest": [1000.0, 2000.0],
+        "expiration": ["2027-06-18", "2027-07-16"],
+    })
+    puts = pd.DataFrame({
+        "strike": [400.0, 400.0],
+        "gamma": [0.015, 0.012],
+        "openInterest": [800.0, 1500.0],
+        "expiration": ["2027-06-18", "2027-07-16"],
+    })
+    summary = aggregate_gex_by_expiration(calls, puts, spot)
+    assert list(summary["Expiration"]) == ["2027-06-18", "2027-07-16"]
+    assert "Net GEX ($B)" in summary.columns
+
+
 # ── View mode: Net GEX bars ─────────────────────────────────────────────────
 
 def test_plot_gex_profile_net_view_returns_figure(options_dfs):
@@ -722,96 +805,6 @@ def test_plot_gamma_index_timeline_with_data(tmp_path, monkeypatch):
     assert len(fig.data) >= 3
 
 
-def test_plot_gamma_index_timeline_with_proxy(tmp_path, monkeypatch):
-    """Timeline chart should render with proxy data."""
-    hist_file = str(tmp_path / "gamma_index_history.json")
-    monkeypatch.setattr("modules.gamma_exposure._HISTORY_FILE", hist_file)
-
-    proxy = pd.DataFrame({
-        "date": pd.date_range("2026-01-01", periods=60, freq="B"),
-        "gamma_proxy": np.sin(np.linspace(0, 4 * np.pi, 60)) * 0.5,
-        "vix": np.random.uniform(15, 25, 60),
-        "realized_vol": np.random.uniform(12, 22, 60),
-        "proxy_condition": ["Positive (Stabilizing)"] * 30 + ["Negative (Destabilizing)"] * 30,
-    })
-    fig = plot_gamma_index_timeline("SPY", proxy_df=proxy)
-    assert isinstance(fig, go.Figure)
-    # Should have proxy traces: pos fill, neg fill, proxy line
-    assert len(fig.data) >= 3
-
-
-# ── Historical Gamma Proxy ─────────────────────────────────────────────────
-
-from modules.gamma_exposure import compute_historical_gamma_proxy, calibrate_proxy_to_real
-
-
-def test_proxy_returns_expected_columns():
-    """Proxy should return date, gamma_proxy, vix, realized_vol, proxy_condition."""
-    dates = pd.bdate_range("2025-01-01", periods=100)
-    spy_df = pd.DataFrame({"Close": 500 + np.cumsum(np.random.randn(100))}, index=dates)
-    vix_df = pd.DataFrame({"Close": 18 + np.random.randn(100) * 3}, index=dates)
-    result = compute_historical_gamma_proxy(spy_df, vix_df)
-    assert not result.empty
-    assert set(result.columns) >= {"date", "gamma_proxy", "vix", "realized_vol", "proxy_condition"}
-
-
-def test_proxy_positive_in_low_vix():
-    """Proxy should tend positive when VIX is consistently low."""
-    dates = pd.bdate_range("2025-01-01", periods=100)
-    spy_df = pd.DataFrame({"Close": np.linspace(500, 520, 100)}, index=dates)
-    # Very low, stable VIX
-    vix_df = pd.DataFrame({"Close": np.full(100, 13.0)}, index=dates)
-    result = compute_historical_gamma_proxy(spy_df, vix_df)
-    # Most recent values should be near zero or positive (stable environment)
-    if not result.empty:
-        tail_mean = result["gamma_proxy"].tail(20).mean()
-        # Low stable VIX → should not be strongly negative
-        assert tail_mean > -1.0
-
-
-def test_proxy_negative_in_vix_spike():
-    """Proxy should go negative when VIX spikes."""
-    dates = pd.bdate_range("2025-01-01", periods=100)
-    spy_df = pd.DataFrame({"Close": 500 - np.linspace(0, 50, 100)}, index=dates)
-    vix = np.full(100, 15.0)
-    vix[70:] = 35.0  # VIX spike
-    vix_df = pd.DataFrame({"Close": vix}, index=dates)
-    result = compute_historical_gamma_proxy(spy_df, vix_df)
-    if not result.empty:
-        spike_mean = result["gamma_proxy"].tail(10).mean()
-        assert spike_mean < 0, "Proxy should be negative during VIX spike"
-
-
-def test_proxy_empty_inputs():
-    """Proxy should return empty DataFrame for empty inputs."""
-    assert compute_historical_gamma_proxy(pd.DataFrame(), pd.DataFrame()).empty
-    assert compute_historical_gamma_proxy(None, None).empty
-
-
-def test_proxy_short_data():
-    """Proxy should handle data shorter than warmup period."""
-    dates = pd.bdate_range("2025-01-01", periods=10)
-    spy_df = pd.DataFrame({"Close": range(10)}, index=dates)
-    vix_df = pd.DataFrame({"Close": range(10)}, index=dates)
-    result = compute_historical_gamma_proxy(spy_df, vix_df)
-    assert result.empty  # Too short for 20-day rolling
-
-
-def test_calibrate_proxy_scales_to_real():
-    """Calibration should scale proxy to match real data magnitude."""
-    proxy = pd.DataFrame({
-        "date": pd.date_range("2026-03-25", periods=3),
-        "gamma_proxy": [10.0, -10.0, 5.0],
-    })
-    real = pd.DataFrame({
-        "date": pd.to_datetime(["2026-03-25", "2026-03-26"]),
-        "gamma_index": [1.0, -1.0],
-    })
-    result = calibrate_proxy_to_real(proxy, real)
-    # Proxy was 10x the real data, so should be scaled down ~10x
-    assert abs(result["gamma_proxy"].iloc[0]) < 3.0  # rough check
-
-
 from modules.gamma_exposure import plot_price_with_gex_levels
 
 
@@ -850,17 +843,6 @@ def test_price_chart_close_only():
     assert isinstance(fig, go.Figure)
     # Should have scatter trace, not candlestick
     assert any(isinstance(t, go.Scatter) for t in fig.data)
-
-
-def test_calibrate_no_overlap():
-    """Calibration without overlap should normalize to ~0.5B std."""
-    proxy = pd.DataFrame({
-        "date": pd.date_range("2025-01-01", periods=100),
-        "gamma_proxy": np.random.randn(100) * 5,
-    })
-    real = pd.DataFrame()  # no real data
-    result = calibrate_proxy_to_real(proxy, real)
-    assert abs(result["gamma_proxy"].std() - 0.5) < 0.1
 
 
 # ── Black-Scholes Delta ──────────────────────────────────────────────────────

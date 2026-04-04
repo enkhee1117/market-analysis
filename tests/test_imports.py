@@ -15,10 +15,12 @@ def test_data_fetcher_exports():
         fetch_multi_tickers,
         fetch_options_chain,
         clear_today_cache,
+        get_refresh_bucket,
         TIMEFRAME_MAP,
     )
     assert isinstance(TIMEFRAME_MAP, dict)
     assert callable(clear_today_cache)
+    assert callable(get_refresh_bucket)
 
 
 def test_supabase_cache_exports():
@@ -58,10 +60,12 @@ def test_gamma_exposure_exports():
         gex_flip_point,
         total_gex_metrics,
         compute_gamma_index,
-        compute_historical_gamma_proxy,
         compute_dex,
         total_dex_metrics,
         compute_iv_skew,
+        filter_options_chain,
+        summarize_chain_quality,
+        aggregate_gex_by_expiration,
         save_gamma_index_snapshot,
         load_gamma_index_history,
         plot_price_with_gex_levels,
@@ -74,8 +78,9 @@ def test_gamma_exposure_exports():
     )
     # Verify all are callable
     for fn in (compute_gex, gex_flip_point, total_gex_metrics, compute_gamma_index,
-               compute_historical_gamma_proxy, compute_dex, total_dex_metrics,
-               compute_iv_skew, save_gamma_index_snapshot, load_gamma_index_history,
+               compute_dex, total_dex_metrics,
+               compute_iv_skew, filter_options_chain, summarize_chain_quality,
+               aggregate_gex_by_expiration, save_gamma_index_snapshot, load_gamma_index_history,
                plot_price_with_gex_levels, plot_gex_profile, plot_gex_by_expiration,
                plot_gamma_index_timeline, plot_dex_profile, plot_dex_by_expiration,
                plot_iv_skew):

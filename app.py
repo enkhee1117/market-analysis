@@ -18,6 +18,7 @@ from modules.data_fetcher import (
     fetch_multi_tickers,
     fetch_options_chain,
     clear_today_cache,
+    get_refresh_bucket,
     TIMEFRAME_MAP,
 )
 from modules.supabase_cache import (
@@ -41,10 +42,12 @@ from modules.gamma_exposure import (
     gex_flip_point,
     total_gex_metrics,
     compute_gamma_index,
-    compute_historical_gamma_proxy,
     compute_dex,
     total_dex_metrics,
     compute_iv_skew,
+    filter_options_chain,
+    summarize_chain_quality,
+    aggregate_gex_by_expiration,
     save_gamma_index_snapshot,
     load_gamma_index_history,
     plot_price_with_gex_levels,
@@ -150,6 +153,30 @@ def _get_freshness():
 _freshness = _get_freshness()
 _staleness = data_staleness_info(_freshness)
 _market_open = is_market_open()
+_price_bucket = get_refresh_bucket("price")
+_options_bucket = get_refresh_bucket("options")
+
+
+def _refresh_selected_data():
+    prefixes = {
+        f"{spy_ticker}_price_",
+        f"{gex_ticker}_massive_",
+        f"{gex_ticker}_yf_options_",
+        f"{'^GSPC' if gex_ticker == 'SPX' else gex_ticker}_price_",
+        "SPY_price_",
+        "^VIX_price_",
+        "^VVIX_price_",
+        "SVIX_price_",
+        "_".join(sorted(["^VIX", "^VVIX", "SVIX"])).replace("^", "") + "_multi_",
+    }
+    for prefix in prefixes:
+        clear_today_cache(prefix=prefix)
+    st.cache_data.clear()
+
+
+def _refresh_all_data():
+    clear_today_cache()
+    st.cache_data.clear()
 
 # Compact status line — always visible
 _status_icon = {"fresh": "🟢", "stale": "🟡"}.get(_staleness["status"], "⚪")
@@ -165,21 +192,17 @@ _cooldown_secs = 120 if _market_open else 300
 _cooldown_remaining = max(0, _cooldown_secs - (_now - st.session_state["last_force_refresh"]))
 
 if _cooldown_remaining > 0:
-    st.sidebar.button(
-        f"Refresh Data (wait {int(_cooldown_remaining)}s)",
-        disabled=True,
-    )
-elif _staleness.get("is_stale"):
-    if st.sidebar.button("Refresh Data (Stale!)", type="primary"):
-        st.session_state["last_force_refresh"] = _now
-        clear_today_cache()
-        st.cache_data.clear()
-        st.rerun()
+    st.sidebar.button(f"Refresh Selected (wait {int(_cooldown_remaining)}s)", disabled=True)
+    st.sidebar.button("Refresh All Data", disabled=True)
 else:
-    if st.sidebar.button("Refresh Data"):
+    selected_label = "Refresh Selected (Stale!)" if _staleness.get("is_stale") else "Refresh Selected Data"
+    if st.sidebar.button(selected_label, type="primary" if _staleness.get("is_stale") else "secondary"):
         st.session_state["last_force_refresh"] = _now
-        clear_today_cache()
-        st.cache_data.clear()
+        _refresh_selected_data()
+        st.rerun()
+    if st.sidebar.button("Refresh All Data"):
+        st.session_state["last_force_refresh"] = _now
+        _refresh_all_data()
         st.rerun()
 
 # Detailed status in collapsible section
@@ -187,7 +210,9 @@ with st.sidebar.expander("Data Details"):
     st.caption(f"Options: {_staleness['options_age_str']}")
     st.caption(f"Prices: {_staleness['price_age_str']}")
     st.caption(f"Supabase: {'connected' if _freshness.get('supabase_connected') else 'local cache only'}")
-    st.caption("GEX assumes MM short calls, long puts")
+    st.caption(f"Price refresh bucket: {_price_bucket}")
+    st.caption(f"Options refresh bucket: {_options_bucket}")
+    st.caption("GEX uses a dealer short-call / long-put heuristic")
 
 
 # ── Tabs ──────────────────────────────────────────────────────────────────────
@@ -246,7 +271,7 @@ def _render_dow_tab():
         return
 
     with st.spinner(f"Fetching {spy_ticker} 10-year daily data..."):
-        raw = fetch_price_history(spy_ticker, period="10y", interval="1d")
+        raw = fetch_price_history(spy_ticker, period="10y", interval="1d", refresh_bucket=_price_bucket)
 
     if raw.empty:
         st.error(f"Could not fetch data for {spy_ticker}.")
@@ -319,9 +344,12 @@ def _render_gex_tab():
     gex_view = st.radio("Chart View", ["Call / Put", "Net GEX"], horizontal=True)
 
     with st.spinner(f"Fetching {gex_ticker} options chain..."):
-        calls_df, puts_df, spot, data_source = fetch_options_chain(gex_ticker)
+        raw_calls_df, raw_puts_df, spot, data_source = fetch_options_chain(
+            gex_ticker,
+            refresh_bucket=_options_bucket,
+        )
 
-    if calls_df is None or calls_df.empty or spot is None:
+    if raw_calls_df is None or raw_calls_df.empty or spot is None:
         st.error(f"Could not fetch options data for {gex_ticker}.")
         from modules.data_fetcher import get_last_massive_error
         massive_err = get_last_massive_error()
@@ -331,7 +359,56 @@ def _render_gex_tab():
             st.info("Try switching to SPY in the sidebar — SPX options data availability varies.")
         return
 
-    st.caption(f"Data source: {data_source} · Cached daily")
+    available_expirations = sorted(
+        set(raw_calls_df.get("expiration", pd.Series(dtype=str)).dropna().tolist()) |
+        set(raw_puts_df.get("expiration", pd.Series(dtype=str)).dropna().tolist())
+    )
+
+    st.caption(
+        f"Data source: {data_source} · Spot ${spot:.2f} · "
+        f"Refresh cadence: {'5 min intraday' if _market_open else 'daily after close'}"
+    )
+
+    fc1, fc2, fc3, fc4, fc5 = st.columns([1.15, 1.2, 1, 1, 1])
+    with fc1:
+        dte_bucket = st.selectbox(
+            "DTE Bucket",
+            ["All", "0-7 DTE", "8-30 DTE", "31-90 DTE", "90+ DTE"],
+            index=1,
+            help="Use shorter-dated expiries for a more tactical read of dealer positioning.",
+        )
+    with fc2:
+        selected_expiration = st.selectbox(
+            "Specific Expiration",
+            ["All"] + available_expirations,
+            index=0,
+            help="Overrides the broad expiry lens when you want one exact expiration.",
+        )
+    with fc3:
+        strike_window_pct = st.slider("Strike Window", 5, 40, 15, 5, format="%d%%")
+    with fc4:
+        min_open_interest = st.slider("Min OI", 0, 5000, 100, 50)
+    with fc5:
+        min_volume = st.slider("Min Volume", 0, 2000, 0, 50)
+
+    effective_dte_bucket = "All" if selected_expiration != "All" else dte_bucket
+    moneyness_pct = strike_window_pct / 100.0
+
+    calls_df, puts_df, filter_meta = filter_options_chain(
+        raw_calls_df,
+        raw_puts_df,
+        spot,
+        selected_expiration=selected_expiration,
+        dte_bucket=effective_dte_bucket,
+        moneyness_pct=moneyness_pct,
+        min_open_interest=min_open_interest,
+        min_volume=min_volume,
+    )
+    confidence = summarize_chain_quality(gex_ticker, data_source, filter_meta)
+
+    if calls_df.empty and puts_df.empty:
+        st.warning("No contracts matched the current filter lens. Loosen the expiry or liquidity filters.")
+        return
 
     with st.spinner("Computing GEX..."):
         gex_df  = compute_gex(calls_df, puts_df, spot)
@@ -339,10 +416,48 @@ def _render_gex_tab():
         metrics = total_gex_metrics(gex_df)
         gamma_idx = compute_gamma_index(gex_df, spot)
         save_gamma_index_snapshot(gex_ticker, gamma_idx, spot)
+        gex_exp_df = aggregate_gex_by_expiration(calls_df, puts_df, spot)
 
     if gex_df.empty:
         st.warning("GEX data empty — options gamma/OI fields may be missing in the data.")
         return
+
+    lens_cols = st.columns(5)
+    dominant_exp = None
+    if not gex_exp_df.empty:
+        dominant_exp = gex_exp_df.loc[gex_exp_df["Net GEX ($B)"].abs().idxmax(), "Expiration"]
+
+    with lens_cols[0]:
+        colored_metric("Contracts Used", f"{filter_meta['kept_contracts']:,}",
+                       sub=f"{filter_meta['kept_ratio']:.0%} of fetched chain")
+    with lens_cols[1]:
+        expiry_sub = (
+            f"{filter_meta['min_dte']}-{filter_meta['max_dte']} DTE"
+            if filter_meta.get("min_dte") is not None and filter_meta.get("max_dte") is not None
+            else "No expiry metadata"
+        )
+        colored_metric("Expirations", filter_meta["expiration_count"], sub=expiry_sub)
+    with lens_cols[2]:
+        colored_metric("Dominant Expiry", dominant_exp or "N/A",
+                       sub="largest |net GEX| slice")
+    with lens_cols[3]:
+        colored_metric("Confidence", f"{confidence['score']:.0%}",
+                       sub=confidence["label"])
+    with lens_cols[4]:
+        colored_metric("Open Interest", f"{filter_meta['total_open_interest']:,.0f}",
+                       sub="contracts in active lens")
+
+    with st.expander("Methodology & Coverage", expanded=False):
+        st.markdown(
+            "\n".join([
+                f"- Assumption model: dealer short calls / long puts heuristic.",
+                f"- Active lens: `{selected_expiration}` expiration, `{effective_dte_bucket}` DTE bucket, ±`{strike_window_pct}%` around spot.",
+                f"- Liquidity floor: OI >= `{min_open_interest}` and volume >= `{min_volume}`.",
+                f"- Contracts retained: `{filter_meta['kept_contracts']:,}` of `{filter_meta['raw_contracts']:,}` fetched.",
+                f"- Confidence: **{confidence['label']}** ({confidence['score']:.0%}). Factors: {', '.join(confidence['reasons']) or 'balanced coverage'}.",
+                f"- Data caveat: gamma/DEX are estimates from current OI and reported greeks, not observed dealer books.",
+            ])
+        )
 
     # ── Dynamic interpretation banner ─────────────────────────────────────
     gi_val = gamma_idx.get("gamma_index", 0)
@@ -355,18 +470,16 @@ def _render_gex_tab():
     _interp_parts = []
     if gi_val > 0:
         _interp_parts.append(
-            f"**{gex_ticker}** is in **positive gamma** ({gi_val:+.3f}B) — "
-            f"dealers will sell rallies and buy dips, keeping price **pinned**. "
-            f"Expect low realized vol and mean-reversion."
+            f"**{gex_ticker}** screens as **positive gamma** ({gi_val:+.3f}B) in the current lens. "
+            f"That usually means more mean-reversion and pinning pressure."
         )
     elif gi_val < 0:
         _interp_parts.append(
-            f"**{gex_ticker}** is in **negative gamma** ({gi_val:+.3f}B) — "
-            f"dealers amplify moves in both directions. "
-            f"Expect elevated realized vol and trending/momentum behavior."
+            f"**{gex_ticker}** screens as **negative gamma** ({gi_val:+.3f}B) in the current lens. "
+            f"That usually means faster directional moves and less damping."
         )
     else:
-        _interp_parts.append(f"**{gex_ticker}** gamma is **neutral**.")
+        _interp_parts.append(f"**{gex_ticker}** gamma is **roughly neutral** in the active slice.")
 
     if flip is not None:
         _flip_dist = ((spot - flip) / spot) * 100
@@ -387,7 +500,12 @@ def _render_gex_tab():
             f"Gamma is **heavily concentrated** ({gi_conc:.0%}) near spot — strong pin risk."
         )
 
-    _banner_type = "success" if gi_val > 0 else ("error" if gi_val < 0 else "info")
+    if confidence["label"] == "Low":
+        _interp_parts.append(
+            "Treat this as a low-confidence heuristic read because the filtered slice is thin or highly assumption-driven."
+        )
+
+    _banner_type = "success" if gi_val > 0 else ("warning" if gi_val < 0 else "info")
     getattr(st, _banner_type)("  \n".join(_interp_parts))
 
     # ── Gamma Index metrics row ───────────────────────────────────────────
@@ -436,7 +554,7 @@ def _render_gex_tab():
     # ── Price chart with GEX levels ──────────────────────────────────────
     # Use the underlying ticker for price data (SPX → ^GSPC)
     _price_ticker = "^GSPC" if gex_ticker == "SPX" else gex_ticker
-    _price_hist = fetch_price_history(_price_ticker, period="1mo", interval="1d")
+    _price_hist = fetch_price_history(_price_ticker, period="1mo", interval="1d", refresh_bucket=_price_bucket)
     fig_price = plot_price_with_gex_levels(
         _price_hist, spot, gex_ticker,
         call_wall=cw, put_wall=pw, gamma_flip=flip,
@@ -444,33 +562,36 @@ def _render_gex_tab():
     )
     st.plotly_chart(fig_price, use_container_width=True)
 
-    # Gamma Index timeline
-    with st.spinner("Building Gamma Index timeline..."):
-        if gex_ticker in ("SPY", "SPX"):
-            _spy_hist_for_proxy = fetch_price_history("SPY", period="2y", interval="1d")
-            _vix_hist_for_proxy = fetch_price_history("^VIX", period="2y", interval="1d")
-            _proxy_df = compute_historical_gamma_proxy(_spy_hist_for_proxy, _vix_hist_for_proxy)
-        else:
-            _proxy_df = None
-
-    fig_gi_timeline = plot_gamma_index_timeline(gex_ticker, proxy_df=_proxy_df)
+    fig_gi_timeline = plot_gamma_index_timeline(gex_ticker)
     st.plotly_chart(fig_gi_timeline, use_container_width=True)
 
     st.markdown("---")
 
     fig_gex = plot_gex_profile(gex_df, spot, gex_ticker,
+                               strike_range_pct=moneyness_pct,
                                view_mode=gex_view,
                                call_wall=cw, put_wall=pw)
     st.plotly_chart(fig_gex, use_container_width=True)
 
+    exp_calls, exp_puts, _ = filter_options_chain(
+        raw_calls_df,
+        raw_puts_df,
+        spot,
+        selected_expiration="All",
+        dte_bucket=effective_dte_bucket,
+        moneyness_pct=moneyness_pct,
+        min_open_interest=min_open_interest,
+        min_volume=min_volume,
+    )
+
     col_gex_exp, col_dex_exp = st.columns(2)
     with col_gex_exp:
         st.subheader("GEX by Expiration")
-        fig_exp = plot_gex_by_expiration(calls_df, puts_df, spot, gex_ticker)
+        fig_exp = plot_gex_by_expiration(exp_calls, exp_puts, spot, gex_ticker)
         st.plotly_chart(fig_exp, use_container_width=True)
     with col_dex_exp:
         st.subheader("DEX by Expiration")
-        fig_dex_exp = plot_dex_by_expiration(calls_df, puts_df, spot, gex_ticker)
+        fig_dex_exp = plot_dex_by_expiration(exp_calls, exp_puts, spot, gex_ticker)
         st.plotly_chart(fig_dex_exp, use_container_width=True)
 
     st.markdown("---")
@@ -485,10 +606,15 @@ def _render_gex_tab():
         if not dex_df.empty:
             dex_metrics = total_dex_metrics(dex_df)
             net_dex = dex_metrics.get("total_net_dex_m", 0)
-            dex_label = "Dealers sell shares" if net_dex > 0 else "Dealers buy shares"
+            dex_label = (
+                "Dealers sell shares into strength" if net_dex > 0
+                else "Dealers buy shares into weakness" if net_dex < 0
+                else "Balanced hedge pressure"
+            )
             colored_metric("Net Delta Exposure", f"{net_dex:+.1f}M shares",
                            sub=dex_label)
             fig_dex = plot_dex_profile(dex_df, spot, gex_ticker,
+                                       strike_range_pct=moneyness_pct,
                                        call_wall=cw, put_wall=pw)
             st.plotly_chart(fig_dex, use_container_width=True)
         else:
@@ -497,14 +623,21 @@ def _render_gex_tab():
     with col_iv:
         st.subheader("IV Skew")
         with st.spinner("Computing IV skew..."):
-            iv_df = compute_iv_skew(calls_df, puts_df, spot)
+            iv_df = compute_iv_skew(
+                calls_df,
+                puts_df,
+                spot,
+                expiration=None if selected_expiration == "All" else selected_expiration,
+            )
         if not iv_df.empty:
             # Show ATM IV and skew summary
             atm_mask = (iv_df["moneyness"] >= 0.98) & (iv_df["moneyness"] <= 1.02)
             atm_data = iv_df[atm_mask]
-            if not atm_data.empty and "call_iv" in atm_data.columns:
-                atm_iv = atm_data["call_iv"].mean() * 100
-                colored_metric("ATM Implied Vol", f"{atm_iv:.1f}%", sub="Near-money average")
+            if not atm_data.empty:
+                atm_cols = [c for c in ("call_iv", "put_iv") if c in atm_data.columns]
+                if atm_cols:
+                    atm_iv = atm_data[atm_cols].stack().mean() * 100
+                    colored_metric("ATM Implied Vol", f"{atm_iv:.1f}%", sub="Calls + puts near spot")
             fig_iv = plot_iv_skew(iv_df, spot, gex_ticker)
             st.plotly_chart(fig_iv, use_container_width=True)
         else:
@@ -513,8 +646,8 @@ def _render_gex_tab():
     st.markdown("---")
 
     # ── Raw GEX data + export ────────────────────────────────────────────
-    lo = spot * 0.90
-    hi = spot * 1.10
+    lo = spot * (1 - moneyness_pct)
+    hi = spot * (1 + moneyness_pct)
     sub_gex = gex_df[(gex_df["strike"] >= lo) & (gex_df["strike"] <= hi)].copy()
     sub_gex_disp = sub_gex[["strike", "call_gex_b", "put_gex_b", "net_gex_b"]].rename(
         columns={
@@ -548,7 +681,7 @@ def _render_gex_tab():
     with exp_cols[0]:
         _gex_csv = sub_gex_disp.to_csv(index=False)
         st.download_button(
-            "Download GEX Data (CSV)",
+            "Download Active GEX Slice (CSV)",
             data=_gex_csv,
             file_name=f"{gex_ticker}_gex_{date.today().isoformat()}.csv",
             mime="text/csv",
@@ -578,7 +711,7 @@ def _render_gex_tab():
         )
         _full_csv = _full_gex_disp.to_csv(index=False)
         st.download_button(
-            "Download Full GEX (All Strikes)",
+            "Download Filtered GEX (All Visible Strikes)",
             data=_full_csv,
             file_name=f"{gex_ticker}_gex_full_{date.today().isoformat()}.csv",
             mime="text/csv",
@@ -603,8 +736,8 @@ def _render_vix_tab():
 
     with st.spinner("Fetching VIX / VVIX / SVIX data..."):
         vix_raw = fetch_multi_tickers(["^VIX", "^VVIX", "SVIX"],
-                                       period=vix_period, interval="1d")
-        spy_hist = fetch_price_history(spy_ticker, period=vix_period, interval="1d")
+                                       period=vix_period, interval="1d", refresh_bucket=_price_bucket)
+        spy_hist = fetch_price_history(spy_ticker, period=vix_period, interval="1d", refresh_bucket=_price_bucket)
 
     if vix_raw.empty:
         st.error("Could not fetch VIX data.")
@@ -684,7 +817,7 @@ def _render_seasonality_tab():
     st.markdown("Historical patterns by month, week, and day-of-month.")
 
     with st.spinner(f"Fetching {spy_ticker} 20-year data for seasonality..."):
-        seas_raw = fetch_price_history(spy_ticker, period="20y", interval="1d")
+        seas_raw = fetch_price_history(spy_ticker, period="20y", interval="1d", refresh_bucket=_price_bucket)
 
     if seas_raw.empty:
         st.error(f"Could not fetch data for {spy_ticker}.")

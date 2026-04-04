@@ -12,11 +12,14 @@ Covers:
 import pandas as pd
 import numpy as np
 import pytest
+from datetime import datetime, timezone
 from unittest.mock import patch
 
 from modules.data_fetcher import (
     fetch_price_history,
     fetch_multi_tickers,
+    get_refresh_bucket,
+    clear_today_cache,
     TIMEFRAME_MAP,
 )
 
@@ -32,6 +35,20 @@ def test_timeframe_map_values_are_tuples_of_strings():
     for label, (period, interval) in TIMEFRAME_MAP.items():
         assert isinstance(period, str), f"{label}: period must be str"
         assert isinstance(interval, str), f"{label}: interval must be str"
+
+
+def test_get_refresh_bucket_daily_when_market_closed():
+    fixed = datetime(2026, 4, 3, 18, 42)
+    with patch("modules.data_fetcher._is_market_open_now", return_value=False):
+        bucket = get_refresh_bucket("options", now=fixed)
+    assert bucket == "20260403"
+
+
+def test_get_refresh_bucket_rounds_intraday_options_to_5m():
+    fixed = datetime(2026, 4, 3, 14, 7, tzinfo=timezone.utc)
+    with patch("modules.data_fetcher._is_market_open_now", return_value=True):
+        bucket = get_refresh_bucket("options", now=fixed)
+    assert bucket == "202604031405"
 
 
 # ── fetch_price_history ───────────────────────────────────────────────────────
@@ -88,3 +105,17 @@ def test_multi_tickers_returns_empty_when_all_fail():
     with patch("modules.data_fetcher.fetch_price_history", return_value=empty):
         result = fetch_multi_tickers.__wrapped__(["INVALID1", "INVALID2"])
     assert result.empty
+
+
+def test_clear_today_cache_can_scope_by_prefix(tmp_path, monkeypatch):
+    monkeypatch.setattr("modules.data_fetcher.CACHE_DIR", str(tmp_path))
+    today = pd.Timestamp.today().date().isoformat()
+    keep = tmp_path / f"QQQ_price_1y_1d_{today}.parquet"
+    delete = tmp_path / f"SPY_price_1y_1d_{today}.parquet"
+    keep.write_text("keep")
+    delete.write_text("delete")
+
+    clear_today_cache(prefix="SPY_price_")
+
+    assert keep.exists()
+    assert not delete.exists()

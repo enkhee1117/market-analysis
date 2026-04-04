@@ -29,6 +29,46 @@ TIMEFRAME_MAP = {
 CACHE_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "cache")
 
 
+def _is_market_open_now() -> bool:
+    """Best-effort market-hours check used for cache bucketing."""
+    try:
+        from modules.supabase_cache import is_market_open
+        return is_market_open()
+    except Exception:
+        return False
+
+
+def get_refresh_bucket(dataset: str = "price", interval: str = "1d",
+                       now: datetime | None = None) -> str:
+    """
+    Return a coarse time bucket used to refresh caches more often intraday.
+
+    Price history is refreshed every 15 minutes during market hours.
+    Options chains are refreshed every 5 minutes during market hours.
+    Outside market hours we reuse a daily bucket.
+    """
+    now = now or datetime.utcnow()
+    if not _is_market_open_now():
+        return now.strftime("%Y%m%d")
+
+    if dataset == "options":
+        bucket_minutes = 5
+    elif interval.endswith(("m", "h")):
+        bucket_minutes = 5
+    else:
+        bucket_minutes = 15
+
+    epoch_minutes = int(now.timestamp() // 60)
+    bucket_start = epoch_minutes - (epoch_minutes % bucket_minutes)
+    bucket_dt = datetime.utcfromtimestamp(bucket_start * 60)
+    return bucket_dt.strftime("%Y%m%d%H%M")
+
+
+def _bucketed_key(key: str, refresh_bucket: str | None) -> str:
+    """Append a freshness bucket to the logical cache key when provided."""
+    return f"{key}_{refresh_bucket}" if refresh_bucket else key
+
+
 def _cache_path(key: str, ext: str = "parquet") -> str:
     """Return path like cache/SPY_price_10y_1d_2026-03-26.parquet"""
     os.makedirs(CACHE_DIR, exist_ok=True)
@@ -129,13 +169,15 @@ def _write_spot_cache(spot_key: str, spot: float) -> None:
         pass
 
 
-def clear_today_cache():
-    """Delete all of today's cached data (local files + Supabase) for Force Refresh."""
+def clear_today_cache(prefix: str | None = None):
+    """Delete today's cached data, optionally scoped to a cache-key prefix."""
     today = date.today().isoformat()
+    prefix_glob = f"{prefix}*" if prefix else "*"
 
     # Layer 1: local files
     if os.path.exists(CACHE_DIR):
-        for f in glob.glob(os.path.join(CACHE_DIR, f"*_{today}.*")):
+        pattern = os.path.join(CACHE_DIR, f"{prefix_glob}_{today}.*")
+        for f in glob.glob(pattern):
             try:
                 os.remove(f)
             except Exception:
@@ -146,8 +188,11 @@ def clear_today_cache():
         from modules.supabase_cache import _get_client
         client = _get_client()
         if client:
-            client.table("options_cache").delete().eq("cache_date", today).execute()
-            client.table("price_cache").delete().eq("cache_date", today).execute()
+            for table in ("options_cache", "price_cache"):
+                query = client.table(table).delete().eq("cache_date", today)
+                if prefix:
+                    query = query.like("cache_key", f"{prefix}%")
+                query.execute()
     except Exception:
         pass
 
@@ -155,9 +200,15 @@ def clear_today_cache():
 # ── Data fetching functions ──────────────────────────────────────────────────
 
 @st.cache_data(ttl=86400)
-def fetch_price_history(ticker: str, period: str = "10y", interval: str = "1d") -> pd.DataFrame:
-    """Fetch OHLCV price history for a ticker. Cached to disk daily."""
-    cache_key = f"{ticker}_price_{period}_{interval}"
+def fetch_price_history(
+    ticker: str,
+    period: str = "10y",
+    interval: str = "1d",
+    refresh_bucket: str | None = None,
+) -> pd.DataFrame:
+    """Fetch OHLCV price history for a ticker with intraday-aware caching."""
+    refresh_bucket = refresh_bucket or get_refresh_bucket("price", interval=interval)
+    cache_key = _bucketed_key(f"{ticker}_price_{period}_{interval}", refresh_bucket)
     cached = _read_cache(cache_key)
     if cached is not None:
         return cached
@@ -177,17 +228,23 @@ def fetch_price_history(ticker: str, period: str = "10y", interval: str = "1d") 
 
 
 @st.cache_data(ttl=86400)
-def fetch_multi_tickers(tickers: list, period: str = "1y", interval: str = "1d") -> pd.DataFrame:
-    """Fetch closing prices for multiple tickers. Cached to disk daily."""
+def fetch_multi_tickers(
+    tickers: list,
+    period: str = "1y",
+    interval: str = "1d",
+    refresh_bucket: str | None = None,
+) -> pd.DataFrame:
+    """Fetch closing prices for multiple tickers with intraday-aware caching."""
+    refresh_bucket = refresh_bucket or get_refresh_bucket("price", interval=interval)
     tickers_key = "_".join(sorted(tickers)).replace("^", "")
-    cache_key = f"{tickers_key}_multi_{period}_{interval}"
+    cache_key = _bucketed_key(f"{tickers_key}_multi_{period}_{interval}", refresh_bucket)
     cached = _read_cache(cache_key)
     if cached is not None:
         return cached
 
     data = {}
     for t in tickers:
-        df = fetch_price_history(t, period=period, interval=interval)
+        df = fetch_price_history(t, period=period, interval=interval, refresh_bucket=refresh_bucket)
         if not df.empty and "Close" in df.columns:
             data[t] = df["Close"]
     if data:
@@ -321,7 +378,7 @@ def _massive_get(endpoint: str, params: dict | None = None) -> dict | None:
 
 
 @st.cache_data(ttl=86400)
-def fetch_options_chain_massive(ticker: str):
+def fetch_options_chain_massive(ticker: str, refresh_bucket: str | None = None):
     """
     Fetch full options chain from Massive.com API.
     Returns (calls_df, puts_df, spot) matching the format expected by compute_gex().
@@ -334,9 +391,10 @@ def fetch_options_chain_massive(ticker: str):
     - 5-min circuit-breaker cooldown after repeated 429s
     """
     # Check cache (file → Supabase)
-    calls_cache_key = f"{ticker}_massive_calls"
-    puts_cache_key = f"{ticker}_massive_puts"
-    spot_cache_key = f"{ticker}_massive_spot"
+    refresh_bucket = refresh_bucket or get_refresh_bucket("options")
+    calls_cache_key = _bucketed_key(f"{ticker}_massive_calls", refresh_bucket)
+    puts_cache_key = _bucketed_key(f"{ticker}_massive_puts", refresh_bucket)
+    spot_cache_key = _bucketed_key(f"{ticker}_massive_spot", refresh_bucket)
 
     cached_calls = _read_cache(calls_cache_key)
     cached_puts = _read_cache(puts_cache_key)
@@ -430,28 +488,30 @@ def fetch_options_chain_massive(ticker: str):
 
 # ── Options chain (with Massive fallback to Yahoo) ───────────────────────────
 
-def fetch_options_chain(ticker: str):
+def fetch_options_chain(ticker: str, refresh_bucket: str | None = None):
     """
     Fetch options chain. Uses Massive.com API if an API key is configured,
     otherwise falls back to Yahoo Finance.
     Returns (calls_df, puts_df, spot, source_name).
     """
+    refresh_bucket = refresh_bucket or get_refresh_bucket("options")
     # Try Massive.com first if API key is available
     if _get_massive_api_key():
-        result = fetch_options_chain_massive(ticker)
+        result = fetch_options_chain_massive(ticker, refresh_bucket=refresh_bucket)
         if result and result[0] is not None and not result[0].empty:
             return result[0], result[1], result[2], "Massive.com"
 
     # Fallback: Yahoo Finance
-    result = _fetch_options_chain_yfinance(ticker)
+    result = _fetch_options_chain_yfinance(ticker, refresh_bucket=refresh_bucket)
     return result[0], result[1], result[2], "Yahoo Finance"
 
 
-def _fetch_options_chain_yfinance(ticker: str):
+def _fetch_options_chain_yfinance(ticker: str, refresh_bucket: str | None = None):
     """Fetch options chain from Yahoo Finance (fallback)."""
-    calls_cache_key = f"{ticker}_yf_options_calls"
-    puts_cache_key = f"{ticker}_yf_options_puts"
-    spot_cache_key = f"{ticker}_yf_options_spot"
+    refresh_bucket = refresh_bucket or get_refresh_bucket("options")
+    calls_cache_key = _bucketed_key(f"{ticker}_yf_options_calls", refresh_bucket)
+    puts_cache_key = _bucketed_key(f"{ticker}_yf_options_puts", refresh_bucket)
+    spot_cache_key = _bucketed_key(f"{ticker}_yf_options_spot", refresh_bucket)
 
     cached_calls = _read_cache(calls_cache_key)
     cached_puts = _read_cache(puts_cache_key)

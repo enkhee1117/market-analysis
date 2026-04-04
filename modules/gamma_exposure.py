@@ -12,6 +12,203 @@ import json
 
 # Force Streamlit Cloud redeploy — module version 2026-03-29
 
+INDEX_LIKE_TICKERS = {"SPY", "SPX", "QQQ", "IWM", "DIA"}
+
+
+def _normalize_options_df(df: pd.DataFrame | None) -> pd.DataFrame:
+    """Return a lowercase-column copy of an options DataFrame."""
+    if df is None or df.empty:
+        return pd.DataFrame()
+    out = df.copy()
+    out.columns = [c.lower() for c in out.columns]
+    return out
+
+
+def _option_oi_col(df: pd.DataFrame) -> str | None:
+    """Return the standardized open-interest column name when present."""
+    for col in ("openinterest", "open_interest"):
+        if col in df.columns:
+            return col
+    return None
+
+
+def _expiration_dte(expiration: str) -> int | None:
+    """Convert an expiration string into calendar DTE."""
+    try:
+        exp = datetime.strptime(str(expiration), "%Y-%m-%d").date()
+        return max((exp - datetime.now().date()).days, 0)
+    except Exception:
+        return None
+
+
+def filter_options_chain(
+    calls_df: pd.DataFrame | None,
+    puts_df: pd.DataFrame | None,
+    spot: float,
+    selected_expiration: str = "All",
+    dte_bucket: str = "All",
+    moneyness_pct: float = 0.15,
+    min_open_interest: int = 0,
+    min_volume: int = 0,
+) -> tuple[pd.DataFrame, pd.DataFrame, dict]:
+    """
+    Filter an options chain for the active analytic lens.
+
+    Returns filtered calls/puts plus metadata describing coverage and quality.
+    """
+    raw_calls = _normalize_options_df(calls_df)
+    raw_puts = _normalize_options_df(puts_df)
+
+    def _apply(df: pd.DataFrame) -> pd.DataFrame:
+        if df.empty:
+            return df
+        out = df.copy()
+
+        if selected_expiration != "All" and "expiration" in out.columns:
+            out = out[out["expiration"] == selected_expiration]
+
+        if dte_bucket != "All" and "expiration" in out.columns:
+            out["_dte"] = out["expiration"].map(_expiration_dte)
+            lo, hi = {
+                "0-7 DTE": (0, 7),
+                "8-30 DTE": (8, 30),
+                "31-90 DTE": (31, 90),
+                "90+ DTE": (91, None),
+            }.get(dte_bucket, (None, None))
+            if lo is not None:
+                out = out[out["_dte"] >= lo]
+            if hi is not None:
+                out = out[out["_dte"] <= hi]
+        elif "expiration" in out.columns:
+            out["_dte"] = out["expiration"].map(_expiration_dte)
+
+        if spot and spot > 0 and "strike" in out.columns:
+            lo = spot * (1 - moneyness_pct)
+            hi = spot * (1 + moneyness_pct)
+            out = out[out["strike"].between(lo, hi)]
+
+        oi_col = _option_oi_col(out)
+        if oi_col and min_open_interest > 0:
+            out = out[out[oi_col].fillna(0) >= min_open_interest]
+
+        if "volume" in out.columns and min_volume > 0:
+            out = out[out["volume"].fillna(0) >= min_volume]
+
+        return out.drop(columns=["_dte"], errors="ignore")
+
+    filtered_calls = _apply(raw_calls)
+    filtered_puts = _apply(raw_puts)
+
+    all_filtered = pd.concat([filtered_calls, filtered_puts], ignore_index=True)
+    all_raw = pd.concat([raw_calls, raw_puts], ignore_index=True)
+    kept_contracts = len(all_filtered)
+    raw_contracts = len(all_raw)
+    kept_ratio = kept_contracts / raw_contracts if raw_contracts else 0.0
+
+    expirations = sorted(all_filtered["expiration"].dropna().unique().tolist()) if "expiration" in all_filtered.columns else []
+    dtes = [d for d in (_expiration_dte(exp) for exp in expirations) if d is not None]
+
+    oi_total = 0.0
+    oi_col = _option_oi_col(all_filtered)
+    if oi_col:
+        oi_total = float(all_filtered[oi_col].fillna(0).sum())
+
+    volume_total = float(all_filtered["volume"].fillna(0).sum()) if "volume" in all_filtered.columns else 0.0
+    gamma_coverage = (
+        float(all_filtered["gamma"].fillna(0).ne(0).mean())
+        if kept_contracts and "gamma" in all_filtered.columns
+        else 0.0
+    )
+
+    metadata = {
+        "raw_contracts": raw_contracts,
+        "kept_contracts": kept_contracts,
+        "kept_ratio": round(kept_ratio, 3),
+        "expiration_count": len(expirations),
+        "expirations": expirations,
+        "min_dte": min(dtes) if dtes else None,
+        "max_dte": max(dtes) if dtes else None,
+        "total_open_interest": round(oi_total, 0),
+        "total_volume": round(volume_total, 0),
+        "gamma_coverage": round(gamma_coverage, 3),
+        "selected_expiration": selected_expiration,
+        "dte_bucket": dte_bucket,
+        "moneyness_pct": moneyness_pct,
+        "min_open_interest": min_open_interest,
+        "min_volume": min_volume,
+    }
+    return filtered_calls, filtered_puts, metadata
+
+
+def summarize_chain_quality(
+    ticker: str,
+    data_source: str,
+    filter_meta: dict,
+) -> dict:
+    """Estimate a user-facing confidence level for the current options slice."""
+    score = 0.0
+    reasons = []
+
+    if data_source == "Massive.com":
+        score += 0.25
+        reasons.append("provider includes greeks")
+    else:
+        score += 0.15
+        reasons.append("fallback provider")
+
+    if ticker in INDEX_LIKE_TICKERS:
+        score += 0.2
+        reasons.append("index/ETF assumptions are more reliable")
+    else:
+        score += 0.08
+        reasons.append("single-stock positioning is less observable")
+
+    kept_contracts = filter_meta.get("kept_contracts", 0)
+    kept_ratio = filter_meta.get("kept_ratio", 0.0)
+    expiration_count = filter_meta.get("expiration_count", 0)
+    gamma_coverage = filter_meta.get("gamma_coverage", 0.0)
+    total_open_interest = filter_meta.get("total_open_interest", 0.0)
+
+    if kept_contracts >= 150:
+        score += 0.15
+        reasons.append("ample contract sample")
+    elif kept_contracts >= 50:
+        score += 0.10
+    elif kept_contracts > 0:
+        score += 0.05
+
+    if kept_ratio >= 0.2:
+        score += 0.10
+    elif kept_ratio >= 0.1:
+        score += 0.05
+    else:
+        reasons.append("slice is highly filtered")
+
+    if expiration_count >= 3:
+        score += 0.10
+    elif expiration_count == 1:
+        reasons.append("single-expiry view")
+
+    if gamma_coverage >= 0.8:
+        score += 0.10
+    elif gamma_coverage < 0.4:
+        reasons.append("heavy greek backfill")
+
+    if total_open_interest >= 100000:
+        score += 0.10
+    elif total_open_interest >= 25000:
+        score += 0.05
+
+    score = max(0.05, min(score, 0.95))
+    if score >= 0.75:
+        label = "High"
+    elif score >= 0.5:
+        label = "Medium"
+    else:
+        label = "Low"
+
+    return {"score": round(score, 2), "label": label, "reasons": reasons[:4]}
+
 
 # ── Black-Scholes Gamma ───────────────────────────────────────────────────────
 
@@ -189,7 +386,7 @@ def total_dex_metrics(dex_df: pd.DataFrame) -> dict:
 # ── IV Skew ─────────────────────────────────────────────────────────────────
 
 def compute_iv_skew(calls_df: pd.DataFrame, puts_df: pd.DataFrame,
-                    spot: float) -> pd.DataFrame:
+                    spot: float, expiration: str | None = None) -> pd.DataFrame:
     """
     Compute IV skew data for calls and puts, organized by strike.
 
@@ -208,18 +405,21 @@ def compute_iv_skew(calls_df: pd.DataFrame, puts_df: pd.DataFrame,
         iv_col = "impliedvolatility"
         if iv_col not in d.columns or "strike" not in d.columns:
             return pd.DataFrame()
-        # Use nearest expiration only (most liquid, cleanest skew)
+        # Use an explicit expiration when selected, otherwise default to
+        # the 2nd future expiry to avoid same-day/0DTE IV artifacts.
         if "expiration" in d.columns:
-            nearest_exp = sorted(d["expiration"].unique())
-            # Use 2nd expiration if 1st is 0-1 DTE (often has IV artifacts)
-            today_str = datetime.now().date().isoformat()
-            valid_exps = [e for e in nearest_exp if e > today_str]
-            if len(valid_exps) >= 2:
-                exp = valid_exps[1]  # 2nd nearest
-            elif valid_exps:
-                exp = valid_exps[0]
+            if expiration:
+                exp = expiration
             else:
-                return pd.DataFrame()
+                nearest_exp = sorted(d["expiration"].unique())
+                today_str = datetime.now().date().isoformat()
+                valid_exps = [e for e in nearest_exp if e > today_str]
+                if len(valid_exps) >= 2:
+                    exp = valid_exps[1]
+                elif valid_exps:
+                    exp = valid_exps[0]
+                else:
+                    return pd.DataFrame()
             d = d[d["expiration"] == exp]
 
         d = d[["strike", iv_col]].dropna()
@@ -253,6 +453,54 @@ def compute_iv_skew(calls_df: pd.DataFrame, puts_df: pd.DataFrame,
     merged["iv_skew"] = merged.get("put_iv", 0) - merged.get("call_iv", 0)
     merged = merged.sort_values("strike").reset_index(drop=True)
     return merged
+
+
+def aggregate_gex_by_expiration(calls_df: pd.DataFrame, puts_df: pd.DataFrame,
+                                spot: float) -> pd.DataFrame:
+    """Return per-expiration GEX totals as a DataFrame."""
+    calls = _normalize_options_df(calls_df)
+    puts = _normalize_options_df(puts_df)
+    if calls.empty or "expiration" not in calls.columns:
+        return pd.DataFrame()
+
+    expirations = sorted(set(calls["expiration"].dropna().tolist()) | set(puts.get("expiration", pd.Series(dtype=str)).dropna().tolist()))
+    rows = []
+    for exp in expirations:
+        c = calls[calls["expiration"] == exp]
+        p = puts[puts["expiration"] == exp] if not puts.empty and "expiration" in puts.columns else pd.DataFrame()
+        g = compute_gex(c, p, spot)
+        if not g.empty:
+            rows.append({
+                "Expiration": exp,
+                "Call GEX ($B)": float(g["call_gex_b"].sum()),
+                "Put GEX ($B)": float(g["put_gex_b"].sum()),
+                "Net GEX ($B)": float(g["net_gex_b"].sum()),
+            })
+    return pd.DataFrame(rows).sort_values("Expiration").reset_index(drop=True) if rows else pd.DataFrame()
+
+
+def aggregate_dex_by_expiration(calls_df: pd.DataFrame, puts_df: pd.DataFrame,
+                                spot: float) -> pd.DataFrame:
+    """Return per-expiration DEX totals as a DataFrame."""
+    calls = _normalize_options_df(calls_df)
+    puts = _normalize_options_df(puts_df)
+    if calls.empty or "expiration" not in calls.columns:
+        return pd.DataFrame()
+
+    expirations = sorted(set(calls["expiration"].dropna().tolist()) | set(puts.get("expiration", pd.Series(dtype=str)).dropna().tolist()))
+    rows = []
+    for exp in expirations:
+        c = calls[calls["expiration"] == exp]
+        p = puts[puts["expiration"] == exp] if not puts.empty and "expiration" in puts.columns else pd.DataFrame()
+        d = compute_dex(c, p, spot)
+        if not d.empty:
+            rows.append({
+                "Expiration": exp,
+                "Call DEX (M)": float(d["call_dex_m"].sum()),
+                "Put DEX (M)": float(d["put_dex_m"].sum()),
+                "Net DEX (M)": float(d["net_dex_m"].sum()),
+            })
+    return pd.DataFrame(rows).sort_values("Expiration").reset_index(drop=True) if rows else pd.DataFrame()
 
 
 # ── GEX Calculation ──────────────────────────────────────────────────────────
@@ -578,152 +826,16 @@ def load_gamma_index_history(ticker: str) -> pd.DataFrame:
     return df.sort_values("date").reset_index(drop=True)
 
 
-def compute_historical_gamma_proxy(spy_df: pd.DataFrame, vix_df: pd.DataFrame) -> pd.DataFrame:
+def plot_gamma_index_timeline(ticker: str) -> go.Figure:
     """
-    Compute a historical Gamma Environment Proxy from VIX and SPY data.
+    Line chart of the recorded Gamma Index over time.
 
-    The proxy is based on established options market microstructure:
-    - When VIX is low / declining → dealers are likely in positive gamma
-      (net long gamma via sold puts that are far OTM).  Market is pinned,
-      realized vol < implied vol.
-    - When VIX is high / spiking → dealers are likely in negative gamma
-      (short gamma from bought protection / unwound positions).  Moves
-      are amplified, realized vol > implied vol.
-
-    Proxy signal per day
-    --------------------
-    1. VIX z-score (20d rolling) — captures regime relative to recent history.
-    2. Implied-vs-Realized spread — VIX minus 20d realized vol of SPY.
-       Positive spread → implied > realized → positive-gamma pinning.
-    3. Combine:  proxy = −vix_z × (1 + iv_rv_spread / 100)
-       Flip sign because low-VIX = positive-gamma.
-    4. Normalise to have the same scale as real gamma index where overlap exists.
-
-    Returns a DataFrame with columns: date, gamma_proxy, proxy_condition.
-    """
-    if spy_df is None or spy_df.empty or vix_df is None or vix_df.empty:
-        return pd.DataFrame()
-
-    # Prepare SPY data
-    spy = spy_df.copy()
-    if "Close" not in spy.columns:
-        return pd.DataFrame()
-    spy = spy[["Close"]].dropna()
-    spy.index = pd.to_datetime(spy.index)
-
-    # Prepare VIX data
-    vix = vix_df.copy()
-    if isinstance(vix, pd.DataFrame):
-        if "VIX" in vix.columns:
-            vix = vix[["VIX"]].dropna()
-            vix.columns = ["vix"]
-        elif "Close" in vix.columns:
-            vix = vix[["Close"]].dropna()
-            vix.columns = ["vix"]
-        else:
-            return pd.DataFrame()
-    vix.index = pd.to_datetime(vix.index)
-
-    # Merge on date
-    merged = spy.join(vix, how="inner").dropna()
-    if len(merged) < 30:
-        return pd.DataFrame()
-
-    # 1. VIX z-score (20-day rolling)
-    vix_roll = merged["vix"].rolling(20)
-    merged["vix_z"] = (merged["vix"] - vix_roll.mean()) / vix_roll.std()
-
-    # 2. Realized vol of SPY (20-day annualized)
-    merged["spy_ret"] = merged["Close"].pct_change()
-    merged["realized_vol"] = merged["spy_ret"].rolling(20).std() * np.sqrt(252) * 100
-
-    # 3. IV - RV spread (VIX is annualized % already)
-    merged["iv_rv_spread"] = merged["vix"] - merged["realized_vol"]
-
-    # 4. Raw proxy: negative VIX z-score, amplified by IV-RV spread
-    #    When VIX is below average (z < 0) → proxy is positive (positive gamma)
-    #    When VIX is above average (z > 0) → proxy is negative (negative gamma)
-    #    IV-RV spread > 0 amplifies positive gamma (dealers collecting premium)
-    merged["raw_proxy"] = -merged["vix_z"] * (1 + merged["iv_rv_spread"].clip(-50, 50) / 100)
-
-    # 5. Smooth with 5-day EMA for less noise
-    merged["gamma_proxy"] = merged["raw_proxy"].ewm(span=5, adjust=False).mean()
-
-    # Drop warmup period
-    merged = merged.dropna(subset=["gamma_proxy"])
-
-    # Build result
-    result = pd.DataFrame({
-        "date": merged.index,
-        "gamma_proxy": merged["gamma_proxy"].values,
-        "vix": merged["vix"].values,
-        "realized_vol": merged["realized_vol"].values,
-    }).reset_index(drop=True)
-
-    result["proxy_condition"] = result["gamma_proxy"].apply(
-        lambda x: "Positive (Stabilizing)" if x > 0 else "Negative (Destabilizing)"
-    )
-
-    return result
-
-
-def calibrate_proxy_to_real(proxy_df: pd.DataFrame, real_df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Scale the proxy so its magnitude matches the real gamma index
-    where we have overlapping data points.
-
-    If no overlap exists, normalize proxy to have a reasonable scale
-    (std ≈ 0.5B to match typical GEX magnitudes).
-    """
-    if proxy_df.empty:
-        return proxy_df
-
-    proxy = proxy_df.copy()
-
-    if not real_df.empty and "gamma_index" in real_df.columns and len(real_df) >= 2:
-        # Find overlapping dates
-        real_dates = set(pd.to_datetime(real_df["date"]).dt.date)
-        proxy["_date"] = pd.to_datetime(proxy["date"]).dt.date
-        overlap = proxy[proxy["_date"].isin(real_dates)]
-
-        if len(overlap) >= 1:
-            # Scale factor: match the mean absolute magnitude
-            real_vals = real_df.set_index(pd.to_datetime(real_df["date"]).dt.date)["gamma_index"]
-            proxy_vals = overlap.set_index("_date")["gamma_proxy"]
-            common = proxy_vals.index.intersection(real_vals.index)
-            if len(common) >= 1:
-                real_scale = real_vals.loc[common].abs().mean()
-                proxy_scale = proxy_vals.loc[common].abs().mean()
-                if proxy_scale > 0:
-                    scale = real_scale / proxy_scale
-                    proxy["gamma_proxy"] *= scale
-                    proxy.drop(columns=["_date"], inplace=True)
-                    return proxy
-
-        proxy.drop(columns=["_date"], inplace=True)
-
-    # No overlap: normalize to ~0.5B std (typical magnitude)
-    proxy_std = proxy["gamma_proxy"].std()
-    if proxy_std > 0:
-        proxy["gamma_proxy"] = proxy["gamma_proxy"] / proxy_std * 0.5
-
-    return proxy
-
-
-def plot_gamma_index_timeline(ticker: str, proxy_df: pd.DataFrame | None = None) -> go.Figure:
-    """
-    Line chart of the Gamma Index over time.
-
-    Shows:
-    - Real Gamma Index (solid yellow line) — from daily snapshots.
-    - Historical Proxy (dashed gray line) — from VIX/SPY-derived estimate.
-    - Green/red fill for positive/negative gamma regimes.
+    Shows the saved daily Gamma Index snapshots with green/red regime fill.
     """
     real_df = load_gamma_index_history(ticker)
     has_real = not real_df.empty and "gamma_index" in real_df.columns
-    has_proxy = proxy_df is not None and not proxy_df.empty
 
-    if not has_real and not has_proxy:
+    if not has_real:
         fig = go.Figure()
         fig.update_layout(
             title=f"Gamma Index Timeline — {ticker} (no history yet)",
@@ -737,65 +849,27 @@ def plot_gamma_index_timeline(ticker: str, proxy_df: pd.DataFrame | None = None)
         return fig
 
     fig = go.Figure()
+    pos = real_df["gamma_index"].clip(lower=0)
+    neg = real_df["gamma_index"].clip(upper=0)
 
-    # ── Historical Proxy (background) ──
-    if has_proxy:
-        pdf = proxy_df.copy()
-        pdf["date"] = pd.to_datetime(pdf["date"])
-
-        # Calibrate proxy to real data if available
-        if has_real:
-            pdf = calibrate_proxy_to_real(pdf, real_df)
-
-        # Positive/negative fill areas for proxy
-        pos_proxy = pdf["gamma_proxy"].clip(lower=0)
-        neg_proxy = pdf["gamma_proxy"].clip(upper=0)
-
-        fig.add_trace(go.Scatter(
-            x=pdf["date"], y=pos_proxy,
-            fill="tozeroy", fillcolor="rgba(95,201,123,0.12)",
-            line=dict(width=0), showlegend=False, hoverinfo="skip",
-        ))
-        fig.add_trace(go.Scatter(
-            x=pdf["date"], y=neg_proxy,
-            fill="tozeroy", fillcolor="rgba(232,92,92,0.12)",
-            line=dict(width=0), showlegend=False, hoverinfo="skip",
-        ))
-
-        # Proxy line
-        fig.add_trace(go.Scatter(
-            x=pdf["date"], y=pdf["gamma_proxy"],
-            mode="lines",
-            name="Gamma Proxy (VIX-derived)",
-            line=dict(color="rgba(180,180,180,0.5)", width=1.5, dash="dot"),
-            hovertemplate="Date: %{x|%Y-%m-%d}<br>Proxy: %{y:+.3f}<extra></extra>",
-        ))
-
-    # ── Real Gamma Index (foreground) ──
-    if has_real:
-        # Colour fill: green above zero, red below
-        pos = real_df["gamma_index"].clip(lower=0)
-        neg = real_df["gamma_index"].clip(upper=0)
-
-        fig.add_trace(go.Scatter(
-            x=real_df["date"], y=pos,
-            fill="tozeroy", fillcolor="rgba(95,201,123,0.3)",
-            line=dict(width=0), showlegend=False, hoverinfo="skip",
-        ))
-        fig.add_trace(go.Scatter(
-            x=real_df["date"], y=neg,
-            fill="tozeroy", fillcolor="rgba(232,92,92,0.3)",
-            line=dict(width=0), showlegend=False, hoverinfo="skip",
-        ))
-        # Main real line
-        fig.add_trace(go.Scatter(
-            x=real_df["date"], y=real_df["gamma_index"],
-            mode="lines+markers",
-            name="Gamma Index (Real)",
-            line=dict(color="#F5E642", width=2.5),
-            marker=dict(size=6),
-            hovertemplate="Date: %{x|%Y-%m-%d}<br>GI: %{y:+.3f}B<extra></extra>",
-        ))
+    fig.add_trace(go.Scatter(
+        x=real_df["date"], y=pos,
+        fill="tozeroy", fillcolor="rgba(95,201,123,0.3)",
+        line=dict(width=0), showlegend=False, hoverinfo="skip",
+    ))
+    fig.add_trace(go.Scatter(
+        x=real_df["date"], y=neg,
+        fill="tozeroy", fillcolor="rgba(232,92,92,0.3)",
+        line=dict(width=0), showlegend=False, hoverinfo="skip",
+    ))
+    fig.add_trace(go.Scatter(
+        x=real_df["date"], y=real_df["gamma_index"],
+        mode="lines+markers",
+        name="Gamma Index",
+        line=dict(color="#F5E642", width=2.5),
+        marker=dict(size=6),
+        hovertemplate="Date: %{x|%Y-%m-%d}<br>GI: %{y:+.3f}B<extra></extra>",
+    ))
 
     fig.add_hline(y=0, line_dash="dash", line_color="rgba(255,255,255,0.4)")
 
@@ -808,20 +882,6 @@ def plot_gamma_index_timeline(ticker: str, proxy_df: pd.DataFrame | None = None)
         legend=dict(orientation="h", y=1.05),
         yaxis=dict(zeroline=True, zerolinecolor="rgba(255,255,255,0.4)"),
     )
-
-    # Add annotation explaining proxy
-    if has_proxy and not has_real:
-        fig.add_annotation(
-            text="Proxy estimate from VIX/SPY data · Real data accumulates daily",
-            xref="paper", yref="paper", x=0.5, y=-0.12,
-            showarrow=False, font=dict(size=11, color="#8B9BBF"),
-        )
-    elif has_proxy and has_real:
-        fig.add_annotation(
-            text="Dotted line = VIX-derived proxy · Solid line = real GEX data",
-            xref="paper", yref="paper", x=0.5, y=-0.12,
-            showarrow=False, font=dict(size=11, color="#8B9BBF"),
-        )
 
     return fig
 
@@ -1082,26 +1142,9 @@ def plot_gex_by_expiration(calls_df: pd.DataFrame, puts_df: pd.DataFrame,
         max_months: Only show expirations within this many months.
                     Set to 0 to show all.
     """
-    if calls_df is None or calls_df.empty:
+    df = aggregate_gex_by_expiration(calls_df, puts_df, spot)
+    if df.empty:
         return go.Figure()
-
-    rows = []
-    for exp in calls_df["expiration"].unique():
-        c = calls_df[calls_df["expiration"] == exp]
-        p = puts_df[puts_df["expiration"] == exp] if puts_df is not None else pd.DataFrame()
-        g = compute_gex(c, p, spot)
-        if not g.empty:
-            rows.append({
-                "Expiration": exp,
-                "Call GEX ($B)": g["call_gex_b"].sum(),
-                "Put GEX ($B)":  g["put_gex_b"].sum(),
-                "Net GEX ($B)":  g["net_gex_b"].sum(),
-            })
-
-    if not rows:
-        return go.Figure()
-
-    df = pd.DataFrame(rows).sort_values("Expiration")
 
     # ── Trim to near-term expirations so bars are visible ──
     if max_months > 0:
@@ -1109,7 +1152,7 @@ def plot_gex_by_expiration(calls_df: pd.DataFrame, puts_df: pd.DataFrame,
         cutoff = (date.today() + timedelta(days=max_months * 30)).isoformat()
         df = df[df["Expiration"] <= cutoff]
         if df.empty:
-            df = pd.DataFrame(rows).sort_values("Expiration").head(12)
+            df = aggregate_gex_by_expiration(calls_df, puts_df, spot).head(12)
 
     fig = go.Figure()
 
@@ -1165,26 +1208,9 @@ def plot_dex_by_expiration(calls_df: pd.DataFrame, puts_df: pd.DataFrame,
         max_months: Only show expirations within this many months to keep
                     the chart readable.  Set to 0 to show all.
     """
-    if calls_df is None or calls_df.empty:
+    df = aggregate_dex_by_expiration(calls_df, puts_df, spot)
+    if df.empty:
         return go.Figure()
-
-    rows = []
-    for exp in calls_df["expiration"].unique():
-        c = calls_df[calls_df["expiration"] == exp]
-        p = puts_df[puts_df["expiration"] == exp] if puts_df is not None else pd.DataFrame()
-        d = compute_dex(c, p, spot)
-        if not d.empty:
-            rows.append({
-                "Expiration": exp,
-                "Call DEX (M)": d["call_dex_m"].sum(),
-                "Put DEX (M)":  d["put_dex_m"].sum(),
-                "Net DEX (M)":  d["net_dex_m"].sum(),
-            })
-
-    if not rows:
-        return go.Figure()
-
-    df = pd.DataFrame(rows).sort_values("Expiration")
 
     # ── Trim to near-term expirations so bars are visible ──
     if max_months > 0:
@@ -1192,7 +1218,7 @@ def plot_dex_by_expiration(calls_df: pd.DataFrame, puts_df: pd.DataFrame,
         cutoff = (date.today() + timedelta(days=max_months * 30)).isoformat()
         df = df[df["Expiration"] <= cutoff]
         if df.empty:
-            df = pd.DataFrame(rows).sort_values("Expiration").head(12)
+            df = aggregate_dex_by_expiration(calls_df, puts_df, spot).head(12)
 
     fig = go.Figure()
 
