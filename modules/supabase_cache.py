@@ -179,6 +179,53 @@ def read_cache_remote(table: str, cache_key: str) -> pd.DataFrame | None:
         return None
 
 
+def read_cache_remote_latest_for_date(table: str, cache_date: str, cache_key_prefix: str) -> pd.DataFrame | None:
+    """
+    Read the most recent cache entry for a given date and key prefix.
+
+    Useful for historical daily snapshots where multiple intraday buckets
+    may exist for the same logical dataset on a single date.
+    """
+    client = _get_client()
+    if client is None:
+        return None
+    try:
+        for order_col in ("updated_at", "created_at"):
+            try:
+                resp = (
+                    client.table(table)
+                    .select("data_parquet")
+                    .eq("cache_date", cache_date)
+                    .like("cache_key", f"{cache_key_prefix}%")
+                    .order(order_col, desc=True)
+                    .limit(1)
+                    .execute()
+                )
+                if resp.data and resp.data[0].get("data_parquet"):
+                    raw = _decode_bytea(resp.data[0]["data_parquet"])
+                    return pd.read_parquet(io.BytesIO(raw))
+            except Exception:
+                continue
+        resp = (
+            client.table(table)
+            .select("data_parquet")
+            .eq("cache_date", cache_date)
+            .like("cache_key", f"{cache_key_prefix}%")
+            .limit(1)
+            .execute()
+        )
+        if resp.data and resp.data[0].get("data_parquet"):
+            raw = _decode_bytea(resp.data[0]["data_parquet"])
+            return pd.read_parquet(io.BytesIO(raw))
+        return None
+    except Exception as e:
+        logger.warning(
+            "Supabase read_cache_remote_latest_for_date(%s, %s, %s) failed: %s",
+            table, cache_date, cache_key_prefix, e,
+        )
+        return None
+
+
 def write_cache_remote(
     table: str, cache_key: str, df: pd.DataFrame, cache_date: str
 ) -> None:
@@ -234,6 +281,38 @@ def read_spot_remote(cache_key: str) -> float | None:
         return None
     except Exception as e:
         logger.warning("Supabase read_spot_remote(%s) failed: %s", cache_key, e)
+        return None
+
+
+def read_spot_remote_latest_for_date(cache_date: str, cache_key_prefix: str) -> float | None:
+    """Read the most recent cached spot blob for a given date and key prefix."""
+    client = _get_client()
+    if client is None:
+        return None
+    try:
+        for order_col in ("updated_at", "created_at"):
+            try:
+                resp = (
+                    client.table("options_cache")
+                    .select("data_parquet")
+                    .eq("cache_date", cache_date)
+                    .like("cache_key", f"{cache_key_prefix}%")
+                    .order(order_col, desc=True)
+                    .limit(1)
+                    .execute()
+                )
+                if resp.data and resp.data[0].get("data_parquet"):
+                    import json
+                    raw = _decode_bytea(resp.data[0]["data_parquet"])
+                    return json.loads(raw.decode("utf-8")).get("spot")
+            except Exception:
+                continue
+        return None
+    except Exception as e:
+        logger.warning(
+            "Supabase read_spot_remote_latest_for_date(%s, %s) failed: %s",
+            cache_date, cache_key_prefix, e,
+        )
         return None
 
 

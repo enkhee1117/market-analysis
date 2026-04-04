@@ -971,7 +971,7 @@ def test_iv_skew_empty():
 # ── DEX + IV Skew Chart Functions ────────────────────────────────────────────
 
 from modules.gamma_exposure import plot_dex_profile, plot_iv_skew
-from modules.gamma_exposure import plot_atm_iv_term_structure
+from modules.gamma_exposure import plot_atm_iv_term_structure, plot_atm_iv_term_structure_comparison
 
 
 def test_plot_dex_profile_returns_figure(options_dfs):
@@ -1058,3 +1058,21 @@ def test_plot_atm_iv_term_structure_returns_figure():
 def test_plot_atm_iv_term_structure_empty():
     fig = plot_atm_iv_term_structure(pd.DataFrame(), "SPY")
     assert isinstance(fig, go.Figure)
+
+
+def test_plot_atm_iv_term_structure_comparison_returns_figure():
+    current = pd.DataFrame({
+        "expiration": ["2027-06-18", "2027-07-16"],
+        "dte": [10, 38],
+        "atm_iv": [0.21, 0.25],
+        "atm_strike": [400.0, 400.0],
+    })
+    previous = pd.DataFrame({
+        "expiration": ["2027-06-18", "2027-07-16"],
+        "dte": [9, 37],
+        "atm_iv": [0.23, 0.27],
+        "atm_strike": [398.0, 398.0],
+    })
+    fig = plot_atm_iv_term_structure_comparison({"Current": current, "1D Ago": previous}, "SPY")
+    assert isinstance(fig, go.Figure)
+    assert len(fig.data) >= 2

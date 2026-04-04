@@ -18,6 +18,7 @@ from unittest.mock import patch
 from modules.data_fetcher import (
     fetch_price_history,
     fetch_multi_tickers,
+    load_historical_options_chain,
     get_refresh_bucket,
     clear_today_cache,
     TIMEFRAME_MAP,
@@ -119,3 +120,21 @@ def test_clear_today_cache_can_scope_by_prefix(tmp_path, monkeypatch):
 
     assert keep.exists()
     assert not delete.exists()
+
+
+def test_load_historical_options_chain_reads_local_cache(tmp_path, monkeypatch):
+    monkeypatch.setattr("modules.data_fetcher.CACHE_DIR", str(tmp_path))
+    cache_date = "2026-04-01"
+    calls = pd.DataFrame({"strike": [400.0], "expiration": ["2026-04-02"]})
+    puts = pd.DataFrame({"strike": [400.0], "expiration": ["2026-04-02"]})
+
+    calls.to_parquet(tmp_path / f"SPY_yf_options_calls_{cache_date}.parquet")
+    puts.to_parquet(tmp_path / f"SPY_yf_options_puts_{cache_date}.parquet")
+    (tmp_path / f"SPY_yf_options_spot_{cache_date}.json").write_text('{"spot": 510.5}')
+
+    hist_calls, hist_puts, spot, source = load_historical_options_chain("SPY", cache_date, preferred_source="Yahoo Finance")
+
+    assert source == "Yahoo Finance"
+    assert spot == 510.5
+    assert not hist_calls.empty
+    assert not hist_puts.empty

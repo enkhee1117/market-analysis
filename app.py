@@ -17,6 +17,7 @@ from modules.data_fetcher import (
     fetch_price_history,
     fetch_multi_tickers,
     fetch_options_chain,
+    load_historical_options_chain,
     clear_today_cache,
     get_refresh_bucket,
     TIMEFRAME_MAP,
@@ -59,6 +60,7 @@ from modules.gamma_exposure import (
     plot_dex_by_expiration,
     plot_iv_skew,
     plot_atm_iv_term_structure,
+    plot_atm_iv_term_structure_comparison,
 )
 from modules.vix_analysis import (
     compute_vix_metrics,
@@ -127,6 +129,11 @@ def colored_metric(label, value, suffix="", positive_is_good=True, sub=""):
         {"<div class='metric-sub'>" + sub + "</div>" if sub else ""}
     </div>
     """, unsafe_allow_html=True)
+
+
+def dashboard_caption(what: str, calc: str, use: str):
+    """Compact explainer for a dashboard section."""
+    st.caption(f"What: {what}  |  Calc: {calc}  |  Use: {use}")
 
 
 # ── Sidebar ───────────────────────────────────────────────────────────────────
@@ -648,8 +655,16 @@ def _render_gex_tab():
 
     st.markdown("---")
 
-    st.subheader("ATM IV Term Structure")
-    with st.spinner("Building ATM IV term structure..."):
+    st.subheader(f"{gex_ticker} Options ATM IV Term Structure")
+    comparison_choices = ["1D Ago", "2D Ago", "3D Ago", "1W Ago", "2W Ago", "1M Ago"]
+    selected_comparisons = st.multiselect(
+        "Compare With",
+        comparison_choices,
+        default=["1D Ago", "1W Ago"],
+        help="Overlays prior daily option-chain snapshots when they exist in cache.",
+    )
+
+    with st.spinner(f"Building {gex_ticker} options ATM IV term structure..."):
         atm_term_df = compute_atm_iv_term_structure(
             raw_calls_df,
             raw_puts_df,
@@ -657,6 +672,38 @@ def _render_gex_tab():
             min_open_interest=min_open_interest,
             min_volume=min_volume,
         )
+        compare_curves = {"Current": atm_term_df}
+        missing_comparisons = []
+        compare_offsets = {
+            "1D Ago": 1,
+            "2D Ago": 2,
+            "3D Ago": 3,
+            "1W Ago": 5,
+            "2W Ago": 10,
+            "1M Ago": 21,
+        }
+        for label in selected_comparisons:
+            offset = compare_offsets[label]
+            target_date = (pd.Timestamp(date.today()) - pd.offsets.BDay(offset)).date()
+            hist_calls, hist_puts, hist_spot, _ = load_historical_options_chain(
+                gex_ticker,
+                target_date,
+                preferred_source=data_source,
+            )
+            if hist_calls is None or hist_puts is None or hist_spot is None:
+                missing_comparisons.append(label)
+                continue
+            hist_term_df = compute_atm_iv_term_structure(
+                hist_calls,
+                hist_puts,
+                hist_spot,
+                min_open_interest=min_open_interest,
+                min_volume=min_volume,
+            )
+            if hist_term_df.empty:
+                missing_comparisons.append(label)
+                continue
+            compare_curves[label] = hist_term_df
 
     if not atm_term_df.empty:
         front = atm_term_df.iloc[0]
@@ -678,13 +725,20 @@ def _render_gex_tab():
                            sub="average ATM IV")
 
         st.caption(
-            "Built from the nearest-to-spot strike at each future expiration across the full chain. "
-            "This view ignores the exact-expiration selector so you can see the whole curve."
+            f"Built from the nearest-to-spot {gex_ticker} option strike at each future expiration across the full chain. "
+            "This is an options implied-volatility term structure, not the VIX futures/index term structure. "
+            "It ignores the exact-expiration selector so you can see the whole curve."
         )
-        fig_atm_term = plot_atm_iv_term_structure(atm_term_df, gex_ticker)
+        if missing_comparisons:
+            st.caption(f"Unavailable comparisons: {', '.join(missing_comparisons)}")
+        fig_atm_term = (
+            plot_atm_iv_term_structure_comparison(compare_curves, gex_ticker)
+            if len(compare_curves) > 1 else
+            plot_atm_iv_term_structure(atm_term_df, gex_ticker)
+        )
         st.plotly_chart(fig_atm_term, use_container_width=True)
     else:
-        st.info("ATM IV term structure unavailable — not enough future expirations met the liquidity filters.")
+        st.info(f"{gex_ticker} options ATM IV term structure unavailable — not enough future expirations met the liquidity filters.")
 
     st.markdown("---")
 
@@ -771,11 +825,7 @@ with tab2:
 @st.fragment
 def _render_vix_tab():
     st.title("VIX / VVIX / SVIX Analysis")
-    st.markdown("""
-    - **VIX** — 30-day implied volatility of S&P 500 options ("fear gauge")
-    - **VVIX** — Volatility of VIX itself; measures the uncertainty of volatility
-    - **SVIX** — 1x Short VIX Futures ETF; inversely tracks VIX futures
-    """)
+    st.caption("VIX = 30-day S&P 500 implied vol, VVIX = vol-of-vol, SVIX = short VIX futures ETF.")
 
     with st.spinner("Fetching VIX / VVIX / SVIX data..."):
         vix_raw = fetch_multi_tickers(["^VIX", "^VVIX", "SVIX"],
@@ -804,6 +854,11 @@ def _render_vix_tab():
 
     if stats:
         st.subheader("VIX Current Snapshot")
+        dashboard_caption(
+            "Quick volatility regime snapshot.",
+            "Current VIX, 52-week range, history percentile, and 1-day change.",
+            "Tells you whether implied vol is cheap, rich, rising, or compressed."
+        )
         sc = st.columns(6)
         with sc[0]: colored_metric("VIX Current", stats["current"],  positive_is_good=False)
         with sc[1]: colored_metric("52W High",     stats["52w_high"], positive_is_good=False)
@@ -819,20 +874,40 @@ def _render_vix_tab():
     st.markdown("---")
 
     fig_vix = plot_vix_panel(vix_df)
+    dashboard_caption(
+        "Main volatility tape: VIX, VVIX, and SVIX together.",
+        "Raw index levels over time with VIX regime shading.",
+        "Shows whether vol is stable, accelerating, or being faded."
+    )
     st.plotly_chart(fig_vix, use_container_width=True)
 
     col_v1, col_v2 = st.columns(2)
     with col_v1:
         st.subheader("VVIX / VIX Ratio")
+        dashboard_caption(
+            "Vol-of-vol relative to spot vol.",
+            "VVIX divided by VIX with mean and standard-deviation bands.",
+            "High ratio can warn that options traders are paying up for convexity before spot vol jumps."
+        )
         fig_ratio = plot_vvix_vix_ratio(vix_df)
         st.plotly_chart(fig_ratio, use_container_width=True)
 
     with col_v2:
         st.subheader("VIX Z-Score (20-Day Rolling)")
+        dashboard_caption(
+            "How stretched VIX is versus its recent regime.",
+            "20-day rolling z-score of VIX.",
+            "Useful for spotting vol extremes, reversion setups, and panic/complacency conditions."
+        )
         fig_z = plot_vix_zscore(vix_df)
         st.plotly_chart(fig_z, use_container_width=True)
 
     st.subheader("VIX Term Structure")
+    dashboard_caption(
+        "Curve shape across 9D, 1M, 3M, 6M, and 1Y vol indices.",
+        "Current term-index levels plotted by tenor; slope and inversions summarize contango/backwardation.",
+        "Contango usually signals calmer markets, backwardation usually signals stress or event risk."
+    )
     if term_summary:
         tc = st.columns(4)
         with tc[0]:
@@ -867,10 +942,16 @@ def _render_vix_tab():
             st.info("Term-structure index data unavailable.")
 
     st.subheader("Correlation Matrix")
+    dashboard_caption(
+        "Cross-asset relationship check.",
+        "Pearson correlation of VIX-family data and SPY daily returns over the selected history.",
+        "Helps confirm whether vol is trading as a normal equity hedge or behaving unusually."
+    )
     fig_corr = plot_correlation_matrix(vix_df, spy_hist)
     st.plotly_chart(fig_corr, use_container_width=True)
 
     with st.expander("VIX Regime Distribution"):
+        st.caption("What: Time spent in low, moderate, elevated, and high-vol regimes | Calc: count of days in each VIX bucket | Use: sets expectations for how unusual the current regime is.")
         if "VIX" in vix_df.columns:
             vix_vals = vix_df["VIX"].dropna()
             regimes = {

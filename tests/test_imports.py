@@ -14,6 +14,7 @@ def test_data_fetcher_exports():
         fetch_price_history,
         fetch_multi_tickers,
         fetch_options_chain,
+        load_historical_options_chain,
         clear_today_cache,
         get_refresh_bucket,
         TIMEFRAME_MAP,
@@ -21,6 +22,7 @@ def test_data_fetcher_exports():
     assert isinstance(TIMEFRAME_MAP, dict)
     assert callable(clear_today_cache)
     assert callable(get_refresh_bucket)
+    assert callable(load_historical_options_chain)
 
 
 def test_supabase_cache_exports():
@@ -77,6 +79,7 @@ def test_gamma_exposure_exports():
         plot_dex_by_expiration,
         plot_iv_skew,
         plot_atm_iv_term_structure,
+        plot_atm_iv_term_structure_comparison,
     )
     # Verify all are callable
     for fn in (compute_gex, gex_flip_point, total_gex_metrics, compute_gamma_index,
@@ -86,7 +89,7 @@ def test_gamma_exposure_exports():
                aggregate_gex_by_expiration, save_gamma_index_snapshot, load_gamma_index_history,
                plot_price_with_gex_levels, plot_gex_profile, plot_gex_by_expiration,
                plot_gamma_index_timeline, plot_dex_profile, plot_dex_by_expiration,
-               plot_iv_skew, plot_atm_iv_term_structure):
+               plot_iv_skew, plot_atm_iv_term_structure, plot_atm_iv_term_structure_comparison):
         assert callable(fn), f"{fn.__name__} is not callable"
 
 

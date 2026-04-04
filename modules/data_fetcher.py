@@ -75,6 +75,12 @@ def _cache_path(key: str, ext: str = "parquet") -> str:
     return os.path.join(CACHE_DIR, f"{key}_{date.today().isoformat()}.{ext}")
 
 
+def _cache_path_for_date(key: str, cache_date: str, ext: str = "parquet") -> str:
+    """Return a cache path for an explicit cache date."""
+    os.makedirs(CACHE_DIR, exist_ok=True)
+    return os.path.join(CACHE_DIR, f"{key}_{cache_date}.{ext}")
+
+
 def _supabase_table_for_key(key: str) -> str:
     """Determine which Supabase table to use based on the cache key."""
     return "price_cache" if "_price_" in key or "_multi_" in key else "options_cache"
@@ -108,6 +114,27 @@ def _read_cache(key: str) -> pd.DataFrame | None:
         pass
 
     return None
+
+
+def _read_cache_for_date(key_prefix: str, cache_date: str) -> pd.DataFrame | None:
+    """Read the latest cached DataFrame for a specific date and key prefix."""
+    local_pattern = os.path.join(CACHE_DIR, f"{key_prefix}*_{cache_date}.parquet")
+    local_files = sorted(glob.glob(local_pattern), reverse=True)
+    for path in local_files:
+        try:
+            return pd.read_parquet(path)
+        except Exception:
+            continue
+
+    try:
+        from modules.supabase_cache import read_cache_remote_latest_for_date
+        return read_cache_remote_latest_for_date(
+            _supabase_table_for_key(key_prefix),
+            cache_date,
+            key_prefix,
+        )
+    except Exception:
+        return None
 
 
 def _write_cache(key: str, df: pd.DataFrame) -> None:
@@ -146,6 +173,24 @@ def _read_spot_cache(spot_key: str) -> float | None:
         from modules.supabase_cache import read_spot_remote
         today = date.today().isoformat()
         return read_spot_remote(f"{spot_key}_{today}")
+    except Exception:
+        return None
+
+
+def _read_spot_cache_for_date(spot_key_prefix: str, cache_date: str) -> float | None:
+    """Read the latest cached spot price for a specific date and key prefix."""
+    local_pattern = os.path.join(CACHE_DIR, f"{spot_key_prefix}*_{cache_date}.json")
+    local_files = sorted(glob.glob(local_pattern), reverse=True)
+    for path in local_files:
+        try:
+            with open(path) as f:
+                return json.load(f).get("spot")
+        except Exception:
+            continue
+
+    try:
+        from modules.supabase_cache import read_spot_remote_latest_for_date
+        return read_spot_remote_latest_for_date(cache_date, spot_key_prefix)
     except Exception:
         return None
 
@@ -504,6 +549,33 @@ def fetch_options_chain(ticker: str, refresh_bucket: str | None = None):
     # Fallback: Yahoo Finance
     result = _fetch_options_chain_yfinance(ticker, refresh_bucket=refresh_bucket)
     return result[0], result[1], result[2], "Yahoo Finance"
+
+
+def load_historical_options_chain(ticker: str, target_date: date | str,
+                                  preferred_source: str | None = None):
+    """
+    Load a previously cached options-chain snapshot for a specific date.
+
+    Returns (calls_df, puts_df, spot, source_name). Only dates that were
+    cached previously are available.
+    """
+    cache_date = target_date.isoformat() if isinstance(target_date, date) else str(target_date)
+    sources = []
+    if preferred_source == "Massive.com":
+        sources = [("Massive.com", "massive"), ("Yahoo Finance", "yf_options")]
+    elif preferred_source == "Yahoo Finance":
+        sources = [("Yahoo Finance", "yf_options"), ("Massive.com", "massive")]
+    else:
+        sources = [("Massive.com", "massive"), ("Yahoo Finance", "yf_options")]
+
+    for source_name, source_key in sources:
+        calls = _read_cache_for_date(f"{ticker}_{source_key}_calls", cache_date)
+        puts = _read_cache_for_date(f"{ticker}_{source_key}_puts", cache_date)
+        spot = _read_spot_cache_for_date(f"{ticker}_{source_key}_spot", cache_date)
+        if calls is not None and puts is not None and spot is not None:
+            return calls, puts, spot, source_name
+
+    return None, None, None, None
 
 
 def _fetch_options_chain_yfinance(ticker: str, refresh_bucket: str | None = None):

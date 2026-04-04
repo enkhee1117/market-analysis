@@ -1505,10 +1505,10 @@ def plot_iv_skew(iv_df: pd.DataFrame, spot: float, ticker: str,
 
 
 def plot_atm_iv_term_structure(term_df: pd.DataFrame, ticker: str) -> go.Figure:
-    """Plot ATM IV across expirations to show the options term structure."""
+    """Plot ATM IV across expirations to show the underlying's options IV term structure."""
     if term_df.empty:
         fig = go.Figure()
-        fig.update_layout(title=f"No ATM IV term structure for {ticker}", template="plotly_dark")
+        fig.update_layout(title=f"No {ticker} Options ATM IV Term Structure", template="plotly_dark")
         return fig
 
     fig = go.Figure()
@@ -1553,12 +1553,60 @@ def plot_atm_iv_term_structure(term_df: pd.DataFrame, ticker: str) -> go.Figure:
     ))
 
     fig.update_layout(
-        title=f"{ticker} ATM IV Term Structure",
+        title=f"{ticker} Options ATM IV Term Structure",
         xaxis_title="Days to Expiration",
         yaxis_title="Implied Volatility (%)",
         template="plotly_dark",
         height=430,
         legend=dict(orientation="h", y=1.06),
+        hovermode="x unified",
+    )
+    fig.update_xaxes(tickmode="linear")
+    return fig
+
+
+def plot_atm_iv_term_structure_comparison(curves: dict[str, pd.DataFrame], ticker: str) -> go.Figure:
+    """Plot current and historical ATM IV term-structure curves together."""
+    valid = {label: df for label, df in curves.items() if df is not None and not df.empty}
+    if not valid:
+        fig = go.Figure()
+        fig.update_layout(title=f"No {ticker} Options ATM IV Term Structure", template="plotly_dark")
+        return fig
+
+    fig = go.Figure()
+    palette = {
+        "Current": "#F5E642",
+        "1D Ago": "#4C9BE8",
+        "2D Ago": "#7BB6F0",
+        "3D Ago": "#A6CFF7",
+        "1W Ago": "#F28C38",
+        "2W Ago": "#F5B267",
+        "1M Ago": "#E85C5C",
+    }
+
+    for idx, (label, df) in enumerate(valid.items()):
+        sub = df.dropna(subset=["atm_iv"]).copy()
+        if sub.empty:
+            continue
+        color = palette.get(label, None)
+        fig.add_trace(go.Scatter(
+            x=sub["dte"],
+            y=sub["atm_iv"] * 100,
+            mode="lines+markers",
+            name=label,
+            line=dict(color=color, width=3 if label == "Current" else 2, dash="solid" if label == "Current" else "dot"),
+            marker=dict(size=8 if label == "Current" else 6),
+            customdata=np.column_stack([sub["expiration"].astype(str).values, sub.get("atm_strike", pd.Series(np.nan, index=sub.index)).values]),
+            hovertemplate="Curve: %{fullData.name}<br>DTE: %{x}<br>Expiration: %{customdata[0]}<br>ATM IV: %{y:.1f}%<br>ATM Strike: %{customdata[1]:.1f}<extra></extra>",
+        ))
+
+    fig.update_layout(
+        title=f"{ticker} Options ATM IV Term Structure Comparison",
+        xaxis_title="Days to Expiration",
+        yaxis_title="Implied Volatility (%)",
+        template="plotly_dark",
+        height=450,
+        legend=dict(orientation="h", y=1.08),
         hovermode="x unified",
     )
     fig.update_xaxes(tickmode="linear")
