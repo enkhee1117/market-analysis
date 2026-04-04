@@ -73,16 +73,6 @@ def _add_regime_shading(fig, vix_series: pd.Series, row: int = 1):
             )
 
 
-def _fit_trendline(series: pd.Series) -> pd.Series:
-    """Return a simple linear trendline fitted over the series."""
-    clean = series.dropna()
-    if len(clean) < 2:
-        return pd.Series(dtype=float)
-    x = np.arange(len(clean))
-    slope, intercept = np.polyfit(x, clean.values, 1)
-    return pd.Series(intercept + slope * x, index=clean.index)
-
-
 def _spy_close_series(spy_df: pd.DataFrame) -> pd.Series:
     """Extract a close series from SPY OHLC data."""
     if spy_df is None or spy_df.empty or "Close" not in spy_df.columns:
@@ -90,8 +80,7 @@ def _spy_close_series(spy_df: pd.DataFrame) -> pd.Series:
     return spy_df["Close"].dropna().squeeze()
 
 
-def plot_vvix_vix_ratio(df: pd.DataFrame, spy_df: pd.DataFrame | None = None,
-                        show_trendline: bool = True) -> go.Figure:
+def plot_vvix_vix_ratio(df: pd.DataFrame, spy_df: pd.DataFrame | None = None) -> go.Figure:
     """VVIX/VIX ratio with 1-std bands and optional SPY context panel."""
     if "VVIX_VIX_Ratio" not in df.columns:
         return go.Figure()
@@ -130,17 +119,6 @@ def plot_vvix_vix_ratio(df: pd.DataFrame, spy_df: pd.DataFrame | None = None,
         hovertemplate="Date: %{x|%Y-%m-%d}<br>Ratio: %{y:.3f}<extra></extra>",
     ), row=1, col=1)
 
-    if show_trendline:
-        ratio_trend = _fit_trendline(ratio)
-        if not ratio_trend.empty:
-            fig.add_trace(go.Scatter(
-                x=ratio_trend.index, y=ratio_trend.values,
-                name="Ratio Trend",
-                mode="lines",
-                line=dict(color="#F5E642", width=2, dash="dash"),
-                hovertemplate="Date: %{x|%Y-%m-%d}<br>Trend: %{y:.3f}<extra></extra>",
-            ), row=1, col=1)
-
     fig.add_hline(y=mean,        line_dash="dash",  line_color="white",    line_width=1,
                   annotation_text=f"Mean: {mean:.2f}", annotation_position="right", row=1, col=1)
     fig.add_hline(y=mean + std,  line_dash="dot",   line_color="#4C9BE8",  line_width=1, row=1, col=1)
@@ -158,16 +136,6 @@ def plot_vvix_vix_ratio(df: pd.DataFrame, spy_df: pd.DataFrame | None = None,
                 line=dict(color="#5FC97B", width=2),
                 hovertemplate="Date: %{x|%Y-%m-%d}<br>SPY: %{y:.2f}<extra></extra>",
             ), row=2, col=1)
-            if show_trendline:
-                spy_trend = _fit_trendline(spy_close)
-                if not spy_trend.empty:
-                    fig.add_trace(go.Scatter(
-                        x=spy_trend.index, y=spy_trend.values,
-                        name="SPY Trend",
-                        mode="lines",
-                        line=dict(color="rgba(95,201,123,0.8)", width=2, dash="dash"),
-                        hovertemplate="Date: %{x|%Y-%m-%d}<br>SPY Trend: %{y:.2f}<extra></extra>",
-                    ), row=2, col=1)
 
     fig.update_layout(
         title="VVIX/VIX Ratio (Vol-of-Vol Stress Indicator)",
@@ -175,6 +143,8 @@ def plot_vvix_vix_ratio(df: pd.DataFrame, spy_df: pd.DataFrame | None = None,
         height=520 if has_spy else 380,
         hovermode="x unified",
         legend=dict(orientation="h", y=1.08),
+        dragmode="zoom",
+        newshape=dict(line=dict(color="#F5E642", width=2)),
     )
     fig.update_yaxes(title_text="VVIX / VIX", row=1, col=1)
     if has_spy:
@@ -185,8 +155,7 @@ def plot_vvix_vix_ratio(df: pd.DataFrame, spy_df: pd.DataFrame | None = None,
     return fig
 
 
-def plot_vix_zscore(df: pd.DataFrame, spy_df: pd.DataFrame | None = None,
-                    show_trendline: bool = True) -> go.Figure:
+def plot_vix_zscore(df: pd.DataFrame, spy_df: pd.DataFrame | None = None) -> go.Figure:
     """VIX 20-day rolling z-score with optional SPY context panel."""
     if "VIX_ZScore_20d" not in df.columns:
         return go.Figure()
@@ -211,17 +180,6 @@ def plot_vix_zscore(df: pd.DataFrame, spy_df: pd.DataFrame | None = None,
         hovertemplate="Date: %{x|%Y-%m-%d}<br>Z-Score: %{y:.2f}<extra></extra>",
     ), row=1, col=1)
 
-    if show_trendline:
-        z_trend = _fit_trendline(z)
-        if not z_trend.empty:
-            fig.add_trace(go.Scatter(
-                x=z_trend.index, y=z_trend.values,
-                name="Z-Score Trend",
-                mode="lines",
-                line=dict(color="#F5E642", width=2, dash="dash"),
-                hovertemplate="Date: %{x|%Y-%m-%d}<br>Trend: %{y:.2f}<extra></extra>",
-            ), row=1, col=1)
-
     for lvl, color, label in [(2, "#E85C5C", "+2σ"), (-2, "#5FC97B", "-2σ"),
                                (1, "#F28C38", "+1σ"), (-1, "#F5E642", "-1σ")]:
         fig.add_hline(y=lvl, line_dash="dot", line_color=color, line_width=1,
@@ -237,16 +195,6 @@ def plot_vix_zscore(df: pd.DataFrame, spy_df: pd.DataFrame | None = None,
                 line=dict(color="#5FC97B", width=2),
                 hovertemplate="Date: %{x|%Y-%m-%d}<br>SPY: %{y:.2f}<extra></extra>",
             ), row=2, col=1)
-            if show_trendline:
-                spy_trend = _fit_trendline(spy_close)
-                if not spy_trend.empty:
-                    fig.add_trace(go.Scatter(
-                        x=spy_trend.index, y=spy_trend.values,
-                        name="SPY Trend",
-                        mode="lines",
-                        line=dict(color="rgba(95,201,123,0.8)", width=2, dash="dash"),
-                        hovertemplate="Date: %{x|%Y-%m-%d}<br>SPY Trend: %{y:.2f}<extra></extra>",
-                    ), row=2, col=1)
 
     fig.update_layout(
         title="VIX 20-Day Rolling Z-Score (Overbought/Oversold Vol)",
@@ -254,6 +202,8 @@ def plot_vix_zscore(df: pd.DataFrame, spy_df: pd.DataFrame | None = None,
         height=520 if has_spy else 380,
         hovermode="x unified",
         legend=dict(orientation="h", y=1.08),
+        dragmode="zoom",
+        newshape=dict(line=dict(color="#F5E642", width=2)),
     )
     fig.update_yaxes(title_text="Z-Score", row=1, col=1)
     if has_spy:

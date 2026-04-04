@@ -87,9 +87,10 @@ def test_plot_vvix_vix_ratio_with_spy_context_returns_figure():
     }, index=dates)
     df = compute_vix_metrics(df)
     spy = pd.DataFrame({"Close": np.linspace(580, 610, 40)}, index=dates)
-    fig = plot_vvix_vix_ratio(df, spy_df=spy, show_trendline=True)
+    fig = plot_vvix_vix_ratio(df, spy_df=spy)
     assert isinstance(fig, go.Figure)
-    assert len(fig.data) >= 4
+    assert len(fig.data) == 3
+    assert all("Trend" not in (trace.name or "") for trace in fig.data)
 
 
 def test_plot_vix_zscore_with_spy_context_returns_figure():
@@ -100,6 +101,7 @@ def test_plot_vix_zscore_with_spy_context_returns_figure():
     }, index=dates)
     df = compute_vix_metrics(df)
     spy = pd.DataFrame({"Close": np.linspace(580, 610, 40)}, index=dates)
-    fig = plot_vix_zscore(df, spy_df=spy, show_trendline=True)
+    fig = plot_vix_zscore(df, spy_df=spy)
     assert isinstance(fig, go.Figure)
-    assert len(fig.data) >= 3
+    assert len(fig.data) == 2
+    assert all("Trend" not in (trace.name or "") for trace in fig.data)

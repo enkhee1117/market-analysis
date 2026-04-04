@@ -134,6 +134,14 @@ def dashboard_caption(what: str, calc: str, use: str):
     st.caption(f"What: {what}  |  Calc: {calc}  |  Use: {use}")
 
 
+def chart_drawline_config():
+    """Enable lightweight custom line drawing in Plotly charts."""
+    return {
+        "displaylogo": False,
+        "modeBarButtonsToAdd": ["drawline", "eraseshape"],
+    }
+
+
 # ── Sidebar ───────────────────────────────────────────────────────────────────
 
 st.sidebar.title("Market Analysis")
@@ -911,8 +919,8 @@ def _render_vix_tab():
         "VVIX divided by VIX with mean and standard-deviation bands.",
         "High ratio can warn that options traders are paying up for convexity before spot vol jumps; SPY below helps line up price reaction."
     )
-    fig_ratio = plot_vvix_vix_ratio(vix_df, spy_df=spy_hist, show_trendline=True)
-    st.plotly_chart(fig_ratio, use_container_width=True)
+    fig_ratio = plot_vvix_vix_ratio(vix_df, spy_df=spy_hist)
+    st.plotly_chart(fig_ratio, use_container_width=True, config=chart_drawline_config())
 
     st.subheader("VIX Z-Score (20-Day Rolling)")
     dashboard_caption(
@@ -920,8 +928,8 @@ def _render_vix_tab():
         "20-day rolling z-score of VIX.",
         "Useful for spotting vol extremes, reversion setups, and panic/complacency conditions; SPY below shows the corresponding market move."
     )
-    fig_z = plot_vix_zscore(vix_df, spy_df=spy_hist, show_trendline=True)
-    st.plotly_chart(fig_z, use_container_width=True)
+    fig_z = plot_vix_zscore(vix_df, spy_df=spy_hist)
+    st.plotly_chart(fig_z, use_container_width=True, config=chart_drawline_config())
 
     with st.expander("VIX Regime Distribution"):
         st.caption("What: Time spent in low, moderate, elevated, and high-vol regimes | Calc: count of days in each VIX bucket | Use: sets expectations for how unusual the current regime is.")
