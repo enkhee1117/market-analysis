@@ -264,7 +264,7 @@ def _render_dow_tab():
         selected_days = st.multiselect(
             "Days to Analyze",
             ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"],
-            default=["Monday", "Tuesday", "Friday"],
+            default=["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"],
         )
     with c2:
         selected_timeframes = st.multiselect(
