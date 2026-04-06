@@ -70,12 +70,14 @@ from modules.vix_analysis import (
     compute_vix_metrics,
     compute_vix_term_structure_snapshot,
     compute_vix_forward_returns,
+    compute_vix_beta,
     plot_vvix_vix_ratio,
     plot_vix_zscore,
     plot_vix_term_structure_curve,
     plot_vix_forward_returns_bar,
     plot_vix_forward_returns_box,
     plot_vix_forward_win_rates,
+    plot_vix_beta,
     vix_summary_stats,
 )
 from modules.seasonality import (
@@ -1011,6 +1013,31 @@ def _render_vix_tab():
     )
     fig_z = plot_vix_zscore(vix_df, spy_df=spy_hist)
     st.plotly_chart(fig_z, use_container_width=True, config=chart_drawline_config())
+
+    st.subheader("SPY VIX Beta")
+    dashboard_caption(
+        "How sensitive SPY is to VIX moves.",
+        "Rolling regression: β = Cov(SPY%, VIX%) / Var(VIX%). Shown at 20d, 60d, and 120d windows.",
+        "β near -1 means SPY drops ~1% per 1% VIX rise. β approaching 0 means SPY is temporarily decoupled from vol."
+    )
+    beta_df = compute_vix_beta(vix_df, spy_hist)
+    if not beta_df.empty:
+        bc = st.columns(3)
+        current_beta = beta_df.attrs.get("current_beta")
+        r_sq = beta_df.attrs.get("r_squared")
+        beta_20d = beta_df.iloc[-1].get("VIX_Beta_20d") if "VIX_Beta_20d" in beta_df.columns else None
+        with bc[0]:
+            colored_metric("Full-Period β", f"{current_beta:.3f}" if current_beta else "N/A",
+                           sub="entire history", positive_is_good=False)
+        with bc[1]:
+            colored_metric("Current 20d β",
+                           f"{beta_20d:.3f}" if beta_20d is not None and not np.isnan(beta_20d) else "N/A",
+                           sub="most recent rolling", positive_is_good=False)
+        with bc[2]:
+            colored_metric("R²", f"{r_sq:.3f}" if r_sq else "N/A",
+                           sub="VIX explains this % of SPY variance")
+        fig_beta = plot_vix_beta(beta_df, spy_df=spy_hist)
+        st.plotly_chart(fig_beta, use_container_width=True, config=chart_drawline_config())
 
     with st.expander("VIX Regime Distribution"):
         st.caption("What: Time spent in low, moderate, elevated, and high-vol regimes | Calc: count of days in each VIX bucket | Use: sets expectations for how unusual the current regime is.")

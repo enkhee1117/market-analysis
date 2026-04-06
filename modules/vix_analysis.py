@@ -571,6 +571,105 @@ def plot_vix_forward_win_rates(result: dict) -> go.Figure:
     return fig
 
 
+def compute_vix_beta(vix_df: pd.DataFrame, spy_df: pd.DataFrame,
+                     windows: list | None = None) -> pd.DataFrame:
+    """Compute rolling VIX beta for SPY: β = Cov(SPY%, VIX%) / Var(VIX%).
+
+    Returns DataFrame with columns for each rolling window (e.g. VIX_Beta_20d).
+    """
+    if windows is None:
+        windows = [20, 60, 120]
+
+    spy_close = spy_df["Close"].squeeze() if "Close" in spy_df.columns else pd.Series(dtype=float)
+    if spy_close.empty or "VIX" not in vix_df.columns:
+        return pd.DataFrame()
+
+    spy_ret = spy_close.pct_change() * 100
+    vix_ret = vix_df["VIX"].pct_change() * 100
+
+    combined = pd.DataFrame({"spy": spy_ret, "vix": vix_ret}).dropna()
+    if combined.empty:
+        return pd.DataFrame()
+
+    result = pd.DataFrame(index=combined.index)
+    for w in windows:
+        cov = combined["spy"].rolling(w).cov(combined["vix"])
+        var = combined["vix"].rolling(w).var()
+        result[f"VIX_Beta_{w}d"] = cov / var
+
+    # Current (full-sample) beta
+    full_cov = combined["spy"].cov(combined["vix"])
+    full_var = combined["vix"].var()
+    result.attrs["current_beta"] = round(full_cov / full_var, 3) if full_var > 0 else None
+    result.attrs["r_squared"] = round(combined["spy"].corr(combined["vix"]) ** 2, 3)
+
+    return result
+
+
+def plot_vix_beta(beta_df: pd.DataFrame, spy_df: pd.DataFrame | None = None) -> go.Figure:
+    """Rolling VIX beta chart with optional SPY price context."""
+    if beta_df.empty:
+        return go.Figure()
+
+    spy_close = _spy_close_series(spy_df) if spy_df is not None else pd.Series(dtype=float)
+    has_spy = not spy_close.empty
+
+    fig = make_subplots(
+        rows=2 if has_spy else 1,
+        cols=1,
+        shared_xaxes=True,
+        row_heights=[0.65, 0.35] if has_spy else [1.0],
+        vertical_spacing=0.08,
+    )
+
+    colors = {"20d": "#4C9BE8", "60d": "#F5E642", "120d": "#A575E8"}
+    for col in beta_df.columns:
+        window_label = col.replace("VIX_Beta_", "")
+        color = colors.get(window_label, "#888888")
+        series = beta_df[col].dropna()
+        fig.add_trace(go.Scatter(
+            x=series.index, y=series.values,
+            name=f"β {window_label}",
+            mode="lines",
+            line=dict(color=color, width=2 if "20d" in col else 1.5),
+            opacity=1.0 if "20d" in col else 0.7,
+            hovertemplate=f"Date: %{{x|%Y-%m-%d}}<br>VIX β ({window_label}): %{{y:.3f}}<extra></extra>",
+        ), row=1, col=1)
+
+    # Reference lines
+    fig.add_hline(y=0, line_dash="dash", line_color="rgba(255,255,255,0.3)", row=1, col=1)
+    fig.add_hline(y=-1, line_dash="dot", line_color="rgba(255,255,255,0.2)",
+                  annotation_text="β = -1", annotation_position="right", row=1, col=1)
+
+    current_beta = beta_df.attrs.get("current_beta")
+    title_suffix = f" (current: {current_beta:.3f})" if current_beta is not None else ""
+
+    if has_spy:
+        spy_close = spy_close[spy_close.index.isin(beta_df.index)]
+        if not spy_close.empty:
+            fig.add_trace(go.Scatter(
+                x=spy_close.index, y=spy_close.values,
+                name="SPY Close", mode="lines",
+                line=dict(color="#5FC97B", width=2),
+                hovertemplate="Date: %{x|%Y-%m-%d}<br>SPY: %{y:.2f}<extra></extra>",
+            ), row=2, col=1)
+
+    fig.update_layout(
+        title=f"SPY Rolling VIX Beta{title_suffix}",
+        template="plotly_dark",
+        height=520 if has_spy else 380,
+        hovermode="x unified",
+        legend=dict(orientation="h", y=1.08),
+    )
+    fig.update_yaxes(title_text="VIX Beta (β)", row=1, col=1)
+    if has_spy:
+        fig.update_yaxes(title_text="SPY", row=2, col=1)
+        fig.update_xaxes(title_text="Date", row=2, col=1)
+    else:
+        fig.update_xaxes(title_text="Date", row=1, col=1)
+    return fig
+
+
 def vix_summary_stats(df: pd.DataFrame) -> dict:
     """Return key summary stats for VIX."""
     if "VIX" not in df.columns:

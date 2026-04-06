@@ -107,23 +107,27 @@ def test_vix_analysis_exports():
         compute_vix_metrics,
         compute_vix_term_structure_snapshot,
         compute_vix_forward_returns,
+        compute_vix_beta,
         plot_vvix_vix_ratio,
         plot_vix_zscore,
         plot_vix_term_structure_curve,
         plot_vix_forward_returns_bar,
         plot_vix_forward_returns_box,
         plot_vix_forward_win_rates,
+        plot_vix_beta,
         vix_summary_stats,
     )
     assert callable(compute_vix_metrics)
     assert callable(compute_vix_term_structure_snapshot)
     assert callable(compute_vix_forward_returns)
+    assert callable(compute_vix_beta)
     assert callable(plot_vvix_vix_ratio)
     assert callable(plot_vix_zscore)
     assert callable(plot_vix_term_structure_curve)
     assert callable(plot_vix_forward_returns_bar)
     assert callable(plot_vix_forward_returns_box)
     assert callable(plot_vix_forward_win_rates)
+    assert callable(plot_vix_beta)
     assert callable(vix_summary_stats)
 
 
