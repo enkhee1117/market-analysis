@@ -369,42 +369,72 @@ def compute_conditional_chain(df: pd.DataFrame,
 
 
 def plot_conditional_heatmap(prob_df: pd.DataFrame) -> go.Figure:
-    """Heatmap: rows = today's condition (e.g. 'Monday Green'), columns = P(next green)."""
+    """Annotated heatmap: rows = weekday, columns = 'After Green' / 'After Red'.
+
+    Each cell shows P(next day green) with color scale from red (<45%)
+    through yellow (50%) to green (>55%), annotated with probability,
+    mean return, and sample count.
+    """
     if prob_df.empty:
         return go.Figure()
 
-    prob_df = prob_df.copy()
-    prob_df["Label"] = prob_df["Today"] + " " + prob_df["Today_Color"].str.capitalize()
+    days_order = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"]
+    cols_order = ["green", "red"]
+    col_labels = ["After Green Day", "After Red Day"]
 
-    # Pivot: rows = label, value = P_Green
-    pivot = prob_df.set_index("Label")[["P_Green", "Count"]].copy()
+    # Build z-matrix (P_Green) and text-matrix
+    z = []
+    text = []
+    for day in days_order:
+        z_row = []
+        text_row = []
+        for color in cols_order:
+            row = prob_df[(prob_df["Today"] == day) & (prob_df["Today_Color"] == color)]
+            if row.empty:
+                z_row.append(50)
+                text_row.append("N/A")
+            else:
+                r = row.iloc[0]
+                z_row.append(r["P_Green"])
+                text_row.append(
+                    f"<b>{r['P_Green']:.0f}%</b> green<br>"
+                    f"{r['Mean_Next']:+.3f}% avg<br>"
+                    f"n={r['Count']}"
+                )
+        z.append(z_row)
+        text.append(text_row)
 
-    # Build annotation text
-    annotations = [f"{p:.0f}%\n(n={c})" for p, c in zip(pivot["P_Green"], pivot["Count"])]
+    # Rows = days (bottom-to-top in heatmap), so reverse for top-to-bottom reading
+    z = z[::-1]
+    text = text[::-1]
+    y_labels = [f"{d} →" for d in days_order[::-1]]
 
-    # Color scale: red (low P_Green) to green (high P_Green)
-    colors = ["#E85C5C" if p < 45 else "#F5E642" if p < 55 else "#5FC97B" for p in pivot["P_Green"]]
-
-    fig = go.Figure(go.Bar(
-        x=pivot.index,
-        y=pivot["P_Green"],
-        marker_color=colors,
-        text=annotations,
-        textposition="outside",
-        hovertemplate="<b>%{x}</b><br>P(Next Green): %{y:.1f}%<extra></extra>",
+    fig = go.Figure(go.Heatmap(
+        z=z,
+        x=col_labels,
+        y=y_labels,
+        text=text,
+        texttemplate="%{text}",
+        textfont=dict(size=12),
+        colorscale=[
+            [0.0, "#E85C5C"],   # red at 0%
+            [0.45, "#E85C5C"],  # still red below 45%
+            [0.50, "#F5E642"],  # yellow at 50%
+            [0.55, "#F5E642"],  # still yellow around 50%
+            [1.0, "#5FC97B"],   # green at 100%
+        ],
+        zmin=35,
+        zmax=70,
+        colorbar=dict(title="P(Green)", ticksuffix="%"),
+        hovertemplate="<b>%{y} %{x}</b><br>P(Next Green): %{z:.1f}%<extra></extra>",
     ))
 
-    fig.add_hline(y=50, line_dash="dash", line_color="rgba(255,255,255,0.4)",
-                  annotation_text="50% baseline", annotation_position="right")
-
     fig.update_layout(
-        title="Next-Day P(Green) Given Today's Color",
-        xaxis_title="",
-        yaxis_title="Probability of Next Day Green (%)",
+        title="If Today Is Green/Red → Probability Next Day Is Green",
         template="plotly_dark",
-        height=450,
-        yaxis=dict(range=[0, 100]),
-        xaxis=dict(tickangle=-45),
+        height=380,
+        xaxis=dict(side="top"),
+        yaxis=dict(autorange="reversed"),
     )
     return fig
 
