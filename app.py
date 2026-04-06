@@ -31,10 +31,14 @@ from modules.day_of_week import (
     compute_dow_returns,
     filter_by_timeframe,
     dow_summary,
+    compute_conditional_probabilities,
+    compute_conditional_chain,
     plot_dow_comparison,
     plot_win_rate_comparison,
     plot_dow_distribution,
     plot_cumulative_by_dow,
+    plot_conditional_heatmap,
+    plot_conditional_distribution,
     TIMEFRAMES,
     RETURN_TYPES,
 )
@@ -65,9 +69,13 @@ from modules.gamma_exposure import (
 from modules.vix_analysis import (
     compute_vix_metrics,
     compute_vix_term_structure_snapshot,
+    compute_vix_forward_returns,
     plot_vvix_vix_ratio,
     plot_vix_zscore,
     plot_vix_term_structure_curve,
+    plot_vix_forward_returns_bar,
+    plot_vix_forward_returns_box,
+    plot_vix_forward_win_rates,
     vix_summary_stats,
 )
 from modules.seasonality import (
@@ -344,6 +352,79 @@ def _render_dow_tab():
         st.subheader("Cumulative Return (Day-Only Strategy)")
         fig_cum = plot_cumulative_by_dow(dow_data, selected_days, dist_timeframe, return_col=return_col)
         st.plotly_chart(fig_cum, use_container_width=True)
+
+    # ── Conditional Day-of-Week Scenario Analysis ──────────────────────────
+    st.markdown("---")
+    st.subheader("Scenario Analysis: What Happens Next?")
+    st.caption("If a day closes red or green, what is the probability of the next day being up or down?")
+
+    # Overview heatmap
+    cond_probs = compute_conditional_probabilities(dow_data, return_col=return_col)
+    if not cond_probs.empty:
+        fig_heatmap = plot_conditional_heatmap(cond_probs)
+        st.plotly_chart(fig_heatmap, use_container_width=True)
+
+    # Chain builder
+    st.markdown("##### Build a Scenario Chain")
+    st.caption("Select consecutive day conditions to see what historically happens next.")
+
+    if "scenario_chain" not in st.session_state:
+        st.session_state.scenario_chain = []
+
+    weekdays = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"]
+
+    chain_cols = st.columns([2, 2, 1, 1])
+    with chain_cols[0]:
+        chain_day = st.selectbox("Day", weekdays, key="chain_day_select")
+    with chain_cols[1]:
+        chain_color = st.selectbox("Was", ["Red (down)", "Green (up)"], key="chain_color_select")
+    with chain_cols[2]:
+        if st.button("Add Step", use_container_width=True):
+            color_val = "red" if "Red" in chain_color else "green"
+            if len(st.session_state.scenario_chain) < 4:
+                st.session_state.scenario_chain.append((chain_day, color_val))
+                st.rerun()
+    with chain_cols[3]:
+        if st.button("Reset", use_container_width=True):
+            st.session_state.scenario_chain = []
+            st.rerun()
+
+    chain = st.session_state.scenario_chain
+
+    if chain:
+        chain_desc = " → ".join(
+            f"**{d}** {'🔴' if c == 'red' else '🟢'}" for d, c in chain
+        )
+        st.markdown(f"Current chain: {chain_desc} → **?**")
+
+        result = compute_conditional_chain(dow_data, chain, return_col=return_col)
+
+        if result["count"] == 0:
+            st.warning("Not enough data for this chain. Try a shorter sequence or different conditions.")
+        else:
+            mc = st.columns(5)
+            with mc[0]:
+                colored_metric("P(Green)", f"{result['p_green']:.0f}%",
+                               sub=f"next day: {result['next_day']}")
+            with mc[1]:
+                colored_metric("P(Red)", f"{result['p_red']:.0f}%", positive_is_good=False)
+            with mc[2]:
+                colored_metric("Mean Return", f"{result['mean_return']:+.3f}%")
+            with mc[3]:
+                colored_metric("Median Return", f"{result['median_return']:+.3f}%")
+            with mc[4]:
+                count = result["count"]
+                color = "" if count >= 30 else "⚠️ "
+                colored_metric("Sample Size", f"{color}{count}")
+
+            if count < 30:
+                st.warning(f"Small sample size ({count}). Results may not be statistically reliable.")
+
+            chain_label = " → ".join(f"{d} {c}" for d, c in chain)
+            fig_dist_cond = plot_conditional_distribution(result["returns"], chain_label)
+            st.plotly_chart(fig_dist_cond, use_container_width=True)
+    else:
+        st.info("Add steps above to build a scenario chain (e.g., Monday Red → Tuesday Red → what happens Wednesday?).")
 
 with tab1:
     _render_dow_tab()
@@ -947,6 +1028,83 @@ def _render_vix_tab():
                 for k, v in regimes.items()
             ])
             st.dataframe(regime_df, use_container_width=True, hide_index=True)
+
+    # ── VIX Signal → Forward SPY Returns ──────────────────────────────────
+    st.markdown("---")
+    st.subheader("VIX Signal → Forward SPY Returns")
+    st.caption("When VIX drops or spikes by a given %, how does SPY perform over the next days/weeks/months?")
+
+    sig_cols = st.columns([2, 2, 2])
+    with sig_cols[0]:
+        vix_window = st.selectbox(
+            "VIX Change Window",
+            ["1-Day Change", "5-Day Change"],
+            help="How quickly did VIX move?",
+        )
+    with sig_cols[1]:
+        vix_direction = st.selectbox(
+            "Signal Type",
+            ["VIX Drop (Bullish)", "VIX Spike (Bearish)"],
+        )
+    with sig_cols[2]:
+        vix_threshold = st.slider(
+            "Minimum VIX Move (%)", 3, 30, 10, step=1,
+            help="Only count VIX moves at least this large",
+        )
+
+    vix_chg_col = "VIX_Chg_1d" if "1-Day" in vix_window else "VIX_Chg_5d"
+    vix_dir = "drop" if "Drop" in vix_direction else "spike"
+
+    # Use longer SPY history for meaningful forward return analysis
+    with st.spinner("Computing forward returns..."):
+        spy_long = fetch_price_history(spy_ticker, period="10y", interval="1d", refresh_bucket=_price_bucket)
+        vix_long = fetch_multi_tickers(["^VIX"], period="10y", interval="1d", refresh_bucket=_price_bucket)
+        if not vix_long.empty:
+            vix_long = vix_long.rename(columns={"^VIX": "VIX"})
+            vix_long_metrics = compute_vix_metrics(vix_long)
+            fwd_result = compute_vix_forward_returns(
+                vix_long_metrics, spy_long,
+                vix_change_col=vix_chg_col,
+                threshold=vix_threshold,
+                direction=vix_dir,
+            )
+        else:
+            fwd_result = {"total_signals": 0}
+
+    if fwd_result["total_signals"] == 0:
+        st.info(f"No signal events found. Try lowering the threshold or changing the window.")
+    else:
+        fc = st.columns(3)
+        with fc[0]:
+            colored_metric("Signal Events", fwd_result["total_signals"])
+        with fc[1]:
+            colored_metric("Date Range", fwd_result["date_range"])
+        with fc[2]:
+            colored_metric("Most Recent", fwd_result["most_recent"])
+
+        fig_fwd_bar = plot_vix_forward_returns_bar(fwd_result)
+        st.plotly_chart(fig_fwd_bar, use_container_width=True)
+
+        col_box, col_wr = st.columns(2)
+        with col_box:
+            fig_fwd_box = plot_vix_forward_returns_box(fwd_result)
+            st.plotly_chart(fig_fwd_box, use_container_width=True)
+        with col_wr:
+            fig_fwd_wr = plot_vix_forward_win_rates(fwd_result)
+            st.plotly_chart(fig_fwd_wr, use_container_width=True)
+
+        with st.expander("All Signal Dates & Forward Returns"):
+            display_df = fwd_result["raw_returns"].copy()
+            display_df.index = display_df.index.strftime("%Y-%m-%d")
+            display_df.index.name = "Signal Date"
+            st.dataframe(
+                display_df.style.format("{:+.2f}%").map(
+                    lambda v: "color: #5FC97B" if isinstance(v, (int, float)) and v > 0
+                    else "color: #E85C5C" if isinstance(v, (int, float)) and v < 0
+                    else ""
+                ),
+                use_container_width=True,
+            )
 
 with tab3:
     _render_vix_tab()

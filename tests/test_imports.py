@@ -43,16 +43,24 @@ def test_day_of_week_exports():
         compute_dow_returns,
         filter_by_timeframe,
         dow_summary,
+        compute_conditional_probabilities,
+        compute_conditional_chain,
         plot_dow_comparison,
         plot_win_rate_comparison,
         plot_dow_distribution,
         plot_cumulative_by_dow,
+        plot_conditional_heatmap,
+        plot_conditional_distribution,
         TIMEFRAMES,
         RETURN_TYPES,
     )
     assert isinstance(TIMEFRAMES, dict)
     assert isinstance(RETURN_TYPES, dict)
     assert len(RETURN_TYPES) == 3, "Expected Close-to-Close, Intraday, Overnight"
+    assert callable(compute_conditional_probabilities)
+    assert callable(compute_conditional_chain)
+    assert callable(plot_conditional_heatmap)
+    assert callable(plot_conditional_distribution)
 
 
 def test_gamma_exposure_exports():
@@ -98,16 +106,24 @@ def test_vix_analysis_exports():
     from modules.vix_analysis import (
         compute_vix_metrics,
         compute_vix_term_structure_snapshot,
+        compute_vix_forward_returns,
         plot_vvix_vix_ratio,
         plot_vix_zscore,
         plot_vix_term_structure_curve,
+        plot_vix_forward_returns_bar,
+        plot_vix_forward_returns_box,
+        plot_vix_forward_win_rates,
         vix_summary_stats,
     )
     assert callable(compute_vix_metrics)
     assert callable(compute_vix_term_structure_snapshot)
+    assert callable(compute_vix_forward_returns)
     assert callable(plot_vvix_vix_ratio)
     assert callable(plot_vix_zscore)
     assert callable(plot_vix_term_structure_curve)
+    assert callable(plot_vix_forward_returns_bar)
+    assert callable(plot_vix_forward_returns_box)
+    assert callable(plot_vix_forward_win_rates)
     assert callable(vix_summary_stats)
 
 

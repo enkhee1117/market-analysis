@@ -366,6 +366,209 @@ def plot_correlation_matrix(df: pd.DataFrame, spy_df: pd.DataFrame) -> go.Figure
     return fig
 
 
+# ═════════════════════════════════════════════════════════════════════════════
+# VIX Signal → Forward Returns
+# ═════════════════════════════════════════════════════════════════════════════
+
+FORWARD_PERIODS = {
+    "1d": 1, "2d": 2, "3d": 3, "5d": 5,
+    "1mo": 21, "3mo": 63, "1yr": 252,
+}
+
+
+def compute_vix_forward_returns(vix_df: pd.DataFrame,
+                                spy_df: pd.DataFrame,
+                                vix_change_col: str = "VIX_Chg_1d",
+                                threshold: float = 10.0,
+                                direction: str = "drop") -> dict:
+    """Compute SPY forward returns after VIX moves beyond a threshold.
+
+    Args:
+        vix_change_col: column in vix_df with VIX % change (e.g. VIX_Chg_1d).
+        threshold: magnitude of VIX move in % (always positive).
+        direction: "drop" (VIX fell ≥ threshold) or "spike" (VIX rose ≥ threshold).
+
+    Returns dict with keys: summary (DataFrame), signal_dates, total_signals,
+        date_range, most_recent, raw_returns (DataFrame).
+    """
+    spy_close = spy_df["Close"].squeeze() if "Close" in spy_df.columns else pd.Series(dtype=float)
+    if spy_close.empty or vix_change_col not in vix_df.columns:
+        return {"total_signals": 0}
+
+    # Compute forward returns for SPY
+    fwd = pd.DataFrame(index=spy_close.index)
+    for label, days in FORWARD_PERIODS.items():
+        fwd[label] = (spy_close.shift(-days) / spy_close - 1) * 100
+
+    # Align VIX change with SPY forward returns
+    vix_chg = vix_df[vix_change_col].reindex(spy_close.index)
+    combined = fwd.copy()
+    combined["vix_chg"] = vix_chg
+
+    # Filter to signal dates
+    if direction == "drop":
+        mask = combined["vix_chg"] <= -threshold
+    else:
+        mask = combined["vix_chg"] >= threshold
+
+    signals = combined[mask].copy()
+    if signals.empty:
+        return {"total_signals": 0}
+
+    # Summary stats per horizon
+    rows = []
+    for label in FORWARD_PERIODS:
+        col = signals[label].dropna()
+        if col.empty:
+            continue
+        rows.append({
+            "Horizon": label,
+            "Mean %": round(col.mean(), 2),
+            "Median %": round(col.median(), 2),
+            "Win Rate %": round((col > 0).mean() * 100, 1),
+            "Std %": round(col.std(), 2),
+            "Best %": round(col.max(), 2),
+            "Worst %": round(col.min(), 2),
+            "Count": len(col),
+        })
+
+    return {
+        "summary": pd.DataFrame(rows),
+        "signal_dates": signals.index.tolist(),
+        "total_signals": len(signals),
+        "date_range": f"{signals.index.min().strftime('%Y-%m-%d')} — {signals.index.max().strftime('%Y-%m-%d')}",
+        "most_recent": signals.index.max().strftime("%Y-%m-%d"),
+        "raw_returns": signals[list(FORWARD_PERIODS.keys())],
+        "direction": direction,
+        "threshold": threshold,
+    }
+
+
+def plot_vix_forward_returns_bar(result: dict) -> go.Figure:
+    """Grouped bar chart: mean & median forward SPY return per horizon after VIX signal."""
+    if result.get("total_signals", 0) == 0:
+        return go.Figure()
+
+    df = result["summary"]
+    direction = result.get("direction", "drop")
+    threshold = result.get("threshold", 10)
+    label = f"VIX {'Drop' if direction == 'drop' else 'Spike'} ≥ {threshold}%"
+
+    fig = go.Figure()
+
+    # Mean bars
+    mean_colors = ["#5FC97B" if v >= 0 else "#E85C5C" for v in df["Mean %"]]
+    fig.add_trace(go.Bar(
+        x=df["Horizon"], y=df["Mean %"],
+        name="Mean Return",
+        marker_color=mean_colors,
+        opacity=0.85,
+        text=[f"{v:+.2f}%" for v in df["Mean %"]],
+        textposition="outside",
+        hovertemplate="Horizon: %{x}<br>Mean: %{y:+.2f}%<extra></extra>",
+    ))
+
+    # Median as markers
+    fig.add_trace(go.Scatter(
+        x=df["Horizon"], y=df["Median %"],
+        name="Median Return",
+        mode="markers+text",
+        marker=dict(color="#F5E642", size=10, symbol="diamond"),
+        text=[f"{v:+.2f}%" for v in df["Median %"]],
+        textposition="top center",
+        textfont=dict(color="#F5E642", size=10),
+        hovertemplate="Horizon: %{x}<br>Median: %{y:+.2f}%<extra></extra>",
+    ))
+
+    fig.add_hline(y=0, line_dash="dash", line_color="rgba(255,255,255,0.3)")
+
+    fig.update_layout(
+        title=f"SPY Forward Returns After {label} (n={result['total_signals']})",
+        xaxis_title="Forward Horizon",
+        yaxis_title="Return (%)",
+        template="plotly_dark",
+        height=450,
+        legend=dict(orientation="h", y=1.06),
+        yaxis=dict(zeroline=True, zerolinecolor="rgba(255,255,255,0.4)"),
+    )
+    return fig
+
+
+def plot_vix_forward_returns_box(result: dict) -> go.Figure:
+    """Box plots of SPY forward return distributions per horizon after VIX signal."""
+    if result.get("total_signals", 0) == 0:
+        return go.Figure()
+
+    raw = result["raw_returns"]
+    direction = result.get("direction", "drop")
+    threshold = result.get("threshold", 10)
+    label = f"VIX {'Drop' if direction == 'drop' else 'Spike'} ≥ {threshold}%"
+
+    fig = go.Figure()
+    horizon_colors = {
+        "1d": "#4C9BE8", "2d": "#5FC97B", "3d": "#F5E642",
+        "5d": "#F28C38", "1mo": "#E85C5C", "3mo": "#A575E8", "1yr": "#4CE8D0",
+    }
+
+    for col in raw.columns:
+        vals = raw[col].dropna()
+        if vals.empty:
+            continue
+        color = horizon_colors.get(col, "#888888")
+        fig.add_trace(go.Box(
+            y=vals, name=col,
+            marker_color=color,
+            boxmean=True,
+            hovertemplate=f"<b>{col}</b><br>Return: %{{y:.2f}}%<extra></extra>",
+        ))
+
+    fig.add_hline(y=0, line_dash="dash", line_color="rgba(255,255,255,0.3)")
+
+    fig.update_layout(
+        title=f"Return Distribution by Horizon | {label}",
+        xaxis_title="Forward Horizon",
+        yaxis_title="SPY Return (%)",
+        template="plotly_dark",
+        height=450,
+        showlegend=False,
+    )
+    return fig
+
+
+def plot_vix_forward_win_rates(result: dict) -> go.Figure:
+    """Win rate bars per horizon with sample count annotations."""
+    if result.get("total_signals", 0) == 0:
+        return go.Figure()
+
+    df = result["summary"]
+    direction = result.get("direction", "drop")
+    threshold = result.get("threshold", 10)
+    label = f"VIX {'Drop' if direction == 'drop' else 'Spike'} ≥ {threshold}%"
+
+    colors = ["#5FC97B" if w > 55 else "#F5E642" if w >= 45 else "#E85C5C" for w in df["Win Rate %"]]
+
+    fig = go.Figure(go.Bar(
+        x=df["Horizon"], y=df["Win Rate %"],
+        marker_color=colors,
+        text=[f"{w:.0f}%\n(n={c})" for w, c in zip(df["Win Rate %"], df["Count"])],
+        textposition="outside",
+        hovertemplate="Horizon: %{x}<br>Win Rate: %{y:.1f}%<extra></extra>",
+    ))
+
+    fig.add_hline(y=50, line_dash="dash", line_color="rgba(255,255,255,0.4)",
+                  annotation_text="50%", annotation_position="right")
+
+    fig.update_layout(
+        title=f"Win Rate by Horizon | {label}",
+        xaxis_title="Forward Horizon",
+        yaxis_title="Win Rate (%)",
+        template="plotly_dark",
+        height=400,
+        yaxis=dict(range=[0, 100]),
+    )
+    return fig
+
+
 def vix_summary_stats(df: pd.DataFrame) -> dict:
     """Return key summary stats for VIX."""
     if "VIX" not in df.columns:
