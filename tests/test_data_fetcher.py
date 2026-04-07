@@ -45,11 +45,11 @@ def test_get_refresh_bucket_daily_when_market_closed():
     assert bucket == "20260403"
 
 
-def test_get_refresh_bucket_rounds_intraday_options_to_5m():
+def test_get_refresh_bucket_rounds_intraday_options_to_15m():
     fixed = datetime(2026, 4, 3, 14, 7, tzinfo=timezone.utc)
     with patch("modules.data_fetcher._is_market_open_now", return_value=True):
         bucket = get_refresh_bucket("options", now=fixed)
-    assert bucket == "202604031405"
+    assert bucket == "202604031400"
 
 
 # ── fetch_price_history ───────────────────────────────────────────────────────

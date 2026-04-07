@@ -52,7 +52,7 @@ def get_refresh_bucket(dataset: str = "price", interval: str = "1d",
         return now.strftime("%Y%m%d")
 
     if dataset == "options":
-        bucket_minutes = 5
+        bucket_minutes = 15
     elif interval.endswith(("m", "h")):
         bucket_minutes = 5
     else:
@@ -624,7 +624,7 @@ def _fetch_options_chain_yfinance(ticker: str, refresh_bucket: str | None = None
             puts["expiration"] = exp
             all_calls.append(calls)
             all_puts.append(puts)
-            time.sleep(0.2)
+            time.sleep(0.05)
         except Exception:
             continue
 

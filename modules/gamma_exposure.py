@@ -225,27 +225,32 @@ def _add_computed_gamma(df: pd.DataFrame, spot: float, r: float = 0.05) -> pd.Da
     df = df.copy()
     df.columns = [c.lower() for c in df.columns]
 
-    # Parse expiration → time to expiry in years
+    # Parse expiration → time to expiry in years (vectorized)
     today = datetime.now().date()
     if "expiration" in df.columns:
-        def _tte(exp_str):
-            try:
-                exp = datetime.strptime(str(exp_str), "%Y-%m-%d").date()
-                days = max((exp - today).days, 0)
-                return days / 365.0
-            except Exception:
-                return 0.0
-        df["T"] = df["expiration"].apply(_tte)
+        exp_dates = pd.to_datetime(df["expiration"], errors="coerce").dt.date
+        days = np.array([(d - today).days if d is not None else 0 for d in exp_dates])
+        df["T"] = np.maximum(days, 0) / 365.0
     else:
         df["T"] = 30 / 365.0  # fallback 30 days
 
     iv_col = "impliedvolatility" if "impliedvolatility" in df.columns else None
     if iv_col and "strike" in df.columns:
-        df["gamma"] = df.apply(
-            lambda row: _bs_gamma(spot, row["strike"], row["T"], r, row[iv_col])
-            if row[iv_col] > 0 else 0.0,
-            axis=1,
-        )
+        # Vectorized Black-Scholes gamma (replaces slow row-by-row .apply())
+        S = spot
+        K = df["strike"].values
+        T = df["T"].values
+        sigma = df[iv_col].values
+
+        valid = (T > 0) & (sigma > 0) & (K > 0)
+        gamma = np.zeros(len(df))
+
+        if valid.any():
+            Kv, Tv, sv = K[valid], T[valid], sigma[valid]
+            d1 = (np.log(S / Kv) + (r + 0.5 * sv ** 2) * Tv) / (sv * np.sqrt(Tv))
+            gamma[valid] = norm.pdf(d1) / (S * sv * np.sqrt(Tv))
+
+        df["gamma"] = gamma
     return df
 
 
@@ -269,29 +274,37 @@ def _add_computed_delta(df: pd.DataFrame, spot: float, option_type: str = "call"
     df = df.copy()
     cols_lower = {c.lower(): c for c in df.columns}
 
-    # Determine TTE
+    # Determine TTE (vectorized)
     today = datetime.now().date()
     exp_col = cols_lower.get("expiration")
     if exp_col and exp_col in df.columns:
-        def _tte(exp_str):
-            try:
-                exp = datetime.strptime(str(exp_str), "%Y-%m-%d").date()
-                return max((exp - today).days, 0) / 365.0
-            except Exception:
-                return 0.0
-        df["_T"] = df[exp_col].apply(_tte)
+        exp_dates = pd.to_datetime(df[exp_col], errors="coerce").dt.date
+        days = np.array([(d - today).days if d is not None else 0 for d in exp_dates])
+        df["_T"] = np.maximum(days, 0) / 365.0
     else:
         df["_T"] = 30 / 365.0
 
     iv_col = cols_lower.get("impliedvolatility")
     strike_col = cols_lower.get("strike")
     if iv_col and strike_col:
-        df["delta"] = df.apply(
-            lambda row: _bs_delta(spot, row[strike_col], row["_T"], r,
-                                  row[iv_col], option_type)
-            if row[iv_col] > 0 else 0.0,
-            axis=1,
-        )
+        # Vectorized Black-Scholes delta (replaces slow row-by-row .apply())
+        S = spot
+        K = df[strike_col].values
+        T = df["_T"].values
+        sigma = df[iv_col].values
+
+        valid = (T > 0) & (sigma > 0) & (K > 0)
+        delta = np.zeros(len(df))
+
+        if valid.any():
+            Kv, Tv, sv = K[valid], T[valid], sigma[valid]
+            d1 = (np.log(S / Kv) + (r + 0.5 * sv ** 2) * Tv) / (sv * np.sqrt(Tv))
+            if option_type == "call":
+                delta[valid] = norm.cdf(d1)
+            else:
+                delta[valid] = norm.cdf(d1) - 1
+
+        df["delta"] = delta
     df.drop(columns=["_T"], inplace=True, errors="ignore")
     return df
 
@@ -344,22 +357,28 @@ def compute_dex(calls_df: pd.DataFrame, puts_df: pd.DataFrame,
     calls = _prep(calls_df, "call")
     puts = _prep(puts_df, "put")
 
-    rows = []
-    for _, row in calls.iterrows():
-        # Dealers are short calls → dealer delta = -delta × OI × 100
-        dex = -row["delta"] * row["openInterest"] * 100
-        rows.append({"strike": row["strike"], "call_dex": dex, "put_dex": 0.0})
+    # Vectorized DEX computation (replaces slow .iterrows() loops)
+    dex_parts = []
+    if not calls.empty:
+        call_dex = pd.DataFrame({
+            "strike": calls["strike"].values,
+            "call_dex": -calls["delta"].values * calls["openInterest"].values * 100,
+            "put_dex": 0.0,
+        })
+        dex_parts.append(call_dex)
 
-    for _, row in puts.iterrows():
-        # Dealers are long puts → dealer delta = -put_delta × OI × 100
-        # put_delta is negative, so this is positive (dealers buy stock to hedge)
-        dex = -row["delta"] * row["openInterest"] * 100
-        rows.append({"strike": row["strike"], "call_dex": 0.0, "put_dex": dex})
+    if not puts.empty:
+        put_dex = pd.DataFrame({
+            "strike": puts["strike"].values,
+            "call_dex": 0.0,
+            "put_dex": -puts["delta"].values * puts["openInterest"].values * 100,
+        })
+        dex_parts.append(put_dex)
 
-    if not rows:
+    if not dex_parts:
         return pd.DataFrame()
 
-    df = pd.DataFrame(rows)
+    df = pd.concat(dex_parts, ignore_index=True)
     dex = df.groupby("strike")[["call_dex", "put_dex"]].sum().reset_index()
     dex["net_dex"] = dex["call_dex"] + dex["put_dex"]
 
@@ -629,19 +648,29 @@ def compute_gex(calls_df: pd.DataFrame, puts_df: pd.DataFrame, spot: float) -> p
     calls = _clean(calls_df, "call")
     puts  = _clean(puts_df,  "put")
 
-    rows = []
-    for _, row in calls.iterrows():
-        gex = row["gamma"] * row["openInterest"] * 100 * (spot ** 2) * 0.01
-        rows.append({"strike": row["strike"], "call_gex": gex, "put_gex": 0.0})
+    # Vectorized GEX computation (replaces slow .iterrows() loops)
+    spot2 = spot ** 2 * 0.01
+    gex_parts = []
+    if not calls.empty:
+        call_gex = pd.DataFrame({
+            "strike": calls["strike"].values,
+            "call_gex": calls["gamma"].values * calls["openInterest"].values * 100 * spot2,
+            "put_gex": 0.0,
+        })
+        gex_parts.append(call_gex)
 
-    for _, row in puts.iterrows():
-        gex = -row["gamma"] * row["openInterest"] * 100 * (spot ** 2) * 0.01
-        rows.append({"strike": row["strike"], "call_gex": 0.0, "put_gex": gex})
+    if not puts.empty:
+        put_gex = pd.DataFrame({
+            "strike": puts["strike"].values,
+            "call_gex": 0.0,
+            "put_gex": -puts["gamma"].values * puts["openInterest"].values * 100 * spot2,
+        })
+        gex_parts.append(put_gex)
 
-    if not rows:
+    if not gex_parts:
         return pd.DataFrame()
 
-    df = pd.DataFrame(rows)
+    df = pd.concat(gex_parts, ignore_index=True)
     gex = df.groupby("strike")[["call_gex", "put_gex"]].sum().reset_index()
     gex["net_gex"] = gex["call_gex"] + gex["put_gex"]
 
