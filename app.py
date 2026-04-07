@@ -58,7 +58,6 @@ from modules.gamma_exposure import (
     load_gamma_index_history,
     plot_gex_profile,
     plot_gex_by_expiration,
-    plot_gamma_index_timeline,
     plot_dex_profile,
     plot_dex_by_expiration,
     plot_iv_skew,
@@ -640,9 +639,6 @@ def _render_gex_tab():
                 .map(_ts_color, subset=["Net GEX ($B)"]),
                 use_container_width=True, hide_index=True,
             )
-
-    fig_gi_timeline = plot_gamma_index_timeline(gex_ticker)
-    st.plotly_chart(fig_gi_timeline, use_container_width=True)
 
     st.markdown("---")
 

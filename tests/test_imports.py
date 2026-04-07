@@ -81,7 +81,6 @@ def test_gamma_exposure_exports():
         load_gamma_index_history,
         plot_gex_profile,
         plot_gex_by_expiration,
-        plot_gamma_index_timeline,
         plot_dex_profile,
         plot_dex_by_expiration,
         plot_iv_skew,
@@ -95,7 +94,7 @@ def test_gamma_exposure_exports():
                filter_options_chain, summarize_chain_quality,
                aggregate_gex_by_expiration, save_gamma_index_snapshot, load_gamma_index_history,
                plot_gex_profile, plot_gex_by_expiration,
-               plot_gamma_index_timeline, plot_dex_profile, plot_dex_by_expiration,
+               plot_dex_profile, plot_dex_by_expiration,
                plot_iv_skew, plot_atm_iv_term_structure, plot_atm_iv_term_structure_comparison):
         assert callable(fn), f"{fn.__name__} is not callable"
 
