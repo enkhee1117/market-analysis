@@ -706,16 +706,21 @@ def _render_gex_tab():
                                call_wall=cw, put_wall=pw)
     st.plotly_chart(fig_gex, use_container_width=True)
 
-    exp_calls, exp_puts, _ = filter_options_chain(
-        raw_calls_df,
-        raw_puts_df,
-        spot,
-        selected_expiration="All",
-        dte_bucket=effective_dte_bucket,
-        moneyness_pct=moneyness_pct,
-        min_open_interest=min_open_interest,
-        min_volume=min_volume,
-    )
+    # Reuse already-filtered data when "All" expirations selected; only
+    # re-filter when a specific expiration was chosen (avoids duplicate work).
+    if selected_expiration == "All":
+        exp_calls, exp_puts = calls_df, puts_df
+    else:
+        exp_calls, exp_puts, _ = filter_options_chain(
+            raw_calls_df,
+            raw_puts_df,
+            spot,
+            selected_expiration="All",
+            dte_bucket=effective_dte_bucket,
+            moneyness_pct=moneyness_pct,
+            min_open_interest=min_open_interest,
+            min_volume=min_volume,
+        )
 
     col_gex_exp, col_dex_exp = st.columns(2)
     with col_gex_exp:
@@ -778,90 +783,90 @@ def _render_gex_tab():
 
     st.markdown("---")
 
-    st.subheader(f"{gex_ticker} Options ATM IV Term Structure")
-    comparison_choices = ["1D Ago", "2D Ago", "3D Ago", "1W Ago", "2W Ago", "1M Ago"]
-    selected_comparisons = st.multiselect(
-        "Compare With",
-        comparison_choices,
-        default=["1D Ago", "1W Ago"],
-        help="Overlays prior daily option-chain snapshots when they exist in cache.",
-    )
-
-    with st.spinner(f"Building {gex_ticker} options ATM IV term structure..."):
-        atm_term_df = compute_atm_iv_term_structure(
-            raw_calls_df,
-            raw_puts_df,
-            spot,
-            min_open_interest=min_open_interest,
-            min_volume=min_volume,
+    with st.expander(f"{gex_ticker} Options ATM IV Term Structure", expanded=False):
+        comparison_choices = ["1D Ago", "2D Ago", "3D Ago", "1W Ago", "2W Ago", "1M Ago"]
+        selected_comparisons = st.multiselect(
+            "Compare With",
+            comparison_choices,
+            default=["1D Ago", "1W Ago"],
+            help="Overlays prior daily option-chain snapshots when they exist in cache.",
         )
-        compare_curves = {"Current": atm_term_df}
-        missing_comparisons = []
-        compare_offsets = {
-            "1D Ago": 1,
-            "2D Ago": 2,
-            "3D Ago": 3,
-            "1W Ago": 5,
-            "2W Ago": 10,
-            "1M Ago": 21,
-        }
-        for label in selected_comparisons:
-            offset = compare_offsets[label]
-            target_date = (pd.Timestamp(date.today()) - pd.offsets.BDay(offset)).date()
-            hist_calls, hist_puts, hist_spot, _ = load_historical_options_chain(
-                gex_ticker,
-                target_date,
-                preferred_source=data_source,
-            )
-            if hist_calls is None or hist_puts is None or hist_spot is None:
-                missing_comparisons.append(label)
-                continue
-            hist_term_df = compute_atm_iv_term_structure(
-                hist_calls,
-                hist_puts,
-                hist_spot,
+
+        with st.spinner(f"Building {gex_ticker} options ATM IV term structure..."):
+            atm_term_df = compute_atm_iv_term_structure(
+                raw_calls_df,
+                raw_puts_df,
+                spot,
                 min_open_interest=min_open_interest,
                 min_volume=min_volume,
             )
-            if hist_term_df.empty:
-                missing_comparisons.append(label)
-                continue
-            compare_curves[label] = hist_term_df
+            compare_curves = {"Current": atm_term_df}
+            missing_comparisons = []
+            compare_offsets = {
+                "1D Ago": 1,
+                "2D Ago": 2,
+                "3D Ago": 3,
+                "1W Ago": 5,
+                "2W Ago": 10,
+                "1M Ago": 21,
+            }
+            for label in selected_comparisons:
+                offset = compare_offsets[label]
+                target_date = (pd.Timestamp(date.today()) - pd.offsets.BDay(offset)).date()
+                hist_calls, hist_puts, hist_spot, _ = load_historical_options_chain(
+                    gex_ticker,
+                    target_date,
+                    preferred_source=data_source,
+                )
+                if hist_calls is None or hist_puts is None or hist_spot is None:
+                    missing_comparisons.append(label)
+                    continue
+                hist_term_df = compute_atm_iv_term_structure(
+                    hist_calls,
+                    hist_puts,
+                    hist_spot,
+                    min_open_interest=min_open_interest,
+                    min_volume=min_volume,
+                )
+                if hist_term_df.empty:
+                    missing_comparisons.append(label)
+                    continue
+                compare_curves[label] = hist_term_df
 
-    if not atm_term_df.empty:
-        front = atm_term_df.iloc[0]
-        back = atm_term_df.iloc[-1]
-        nearest_30 = atm_term_df.loc[(atm_term_df["dte"] - 30).abs().idxmin()]
-        term_cols = st.columns(4)
-        with term_cols[0]:
-            colored_metric("Front ATM IV", f"{front['atm_iv'] * 100:.1f}%",
-                           sub=f"{int(front['dte'])} DTE")
-        with term_cols[1]:
-            colored_metric("30D ATM IV", f"{nearest_30['atm_iv'] * 100:.1f}%",
-                           sub=f"{int(nearest_30['dte'])} DTE nearest")
-        with term_cols[2]:
-            colored_metric("Back ATM IV", f"{back['atm_iv'] * 100:.1f}%",
-                           sub=f"{int(back['dte'])} DTE")
-        with term_cols[3]:
-            slope_pp = (back["atm_iv"] - front["atm_iv"]) * 100
-            colored_metric("Front → Back Slope", f"{slope_pp:+.1f} pts",
-                           sub="average ATM IV")
+        if not atm_term_df.empty:
+            front = atm_term_df.iloc[0]
+            back = atm_term_df.iloc[-1]
+            nearest_30 = atm_term_df.loc[(atm_term_df["dte"] - 30).abs().idxmin()]
+            term_cols = st.columns(4)
+            with term_cols[0]:
+                colored_metric("Front ATM IV", f"{front['atm_iv'] * 100:.1f}%",
+                               sub=f"{int(front['dte'])} DTE")
+            with term_cols[1]:
+                colored_metric("30D ATM IV", f"{nearest_30['atm_iv'] * 100:.1f}%",
+                               sub=f"{int(nearest_30['dte'])} DTE nearest")
+            with term_cols[2]:
+                colored_metric("Back ATM IV", f"{back['atm_iv'] * 100:.1f}%",
+                               sub=f"{int(back['dte'])} DTE")
+            with term_cols[3]:
+                slope_pp = (back["atm_iv"] - front["atm_iv"]) * 100
+                colored_metric("Front → Back Slope", f"{slope_pp:+.1f} pts",
+                               sub="average ATM IV")
 
-        st.caption(
-            f"Built from the nearest-to-spot {gex_ticker} option strike at each future expiration across the full chain. "
-            "This is an options implied-volatility term structure, not the VIX futures/index term structure. "
-            "It ignores the exact-expiration selector so you can see the whole curve."
-        )
-        if missing_comparisons:
-            st.caption(f"Unavailable comparisons: {', '.join(missing_comparisons)}")
-        fig_atm_term = (
-            plot_atm_iv_term_structure_comparison(compare_curves, gex_ticker)
-            if len(compare_curves) > 1 else
-            plot_atm_iv_term_structure(atm_term_df, gex_ticker)
-        )
-        st.plotly_chart(fig_atm_term, use_container_width=True)
-    else:
-        st.info(f"{gex_ticker} options ATM IV term structure unavailable — not enough future expirations met the liquidity filters.")
+            st.caption(
+                f"Built from the nearest-to-spot {gex_ticker} option strike at each future expiration across the full chain. "
+                "This is an options implied-volatility term structure, not the VIX futures/index term structure. "
+                "It ignores the exact-expiration selector so you can see the whole curve."
+            )
+            if missing_comparisons:
+                st.caption(f"Unavailable comparisons: {', '.join(missing_comparisons)}")
+            fig_atm_term = (
+                plot_atm_iv_term_structure_comparison(compare_curves, gex_ticker)
+                if len(compare_curves) > 1 else
+                plot_atm_iv_term_structure(atm_term_df, gex_ticker)
+            )
+            st.plotly_chart(fig_atm_term, use_container_width=True)
+        else:
+            st.info(f"{gex_ticker} options ATM IV term structure unavailable — not enough future expirations met the liquidity filters.")
 
     st.markdown("---")
 

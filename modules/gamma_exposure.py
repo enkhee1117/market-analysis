@@ -556,50 +556,115 @@ def compute_atm_iv_term_structure(
 
 def aggregate_gex_by_expiration(calls_df: pd.DataFrame, puts_df: pd.DataFrame,
                                 spot: float) -> pd.DataFrame:
-    """Return per-expiration GEX totals as a DataFrame."""
+    """Return per-expiration GEX totals as a DataFrame.
+
+    Computes gamma once on the full chain then aggregates by expiration,
+    avoiding repeated Black-Scholes calls per expiration.
+    """
     calls = _normalize_options_df(calls_df)
     puts = _normalize_options_df(puts_df)
     if calls.empty or "expiration" not in calls.columns:
         return pd.DataFrame()
 
-    expirations = sorted(set(calls["expiration"].dropna().tolist()) | set(puts.get("expiration", pd.Series(dtype=str)).dropna().tolist()))
+    spot2 = spot ** 2 * 0.01
+    scale = 1e9
+
+    def _gex_col(df, sign):
+        """Add per-row GEX to a normalised options DataFrame."""
+        if df.empty:
+            return pd.DataFrame()
+        d = df.copy()
+        if "gamma" not in d.columns or d["gamma"].isna().all() or (d["gamma"] == 0).all():
+            d = _add_computed_gamma(d, spot)
+        oi_col = "openinterest" if "openinterest" in d.columns else None
+        if oi_col is None or "gamma" not in d.columns or "expiration" not in d.columns:
+            return pd.DataFrame()
+        d = d.dropna(subset=["gamma", oi_col])
+        d = d[(d["gamma"] > 0) & (d[oi_col] > 0)]
+        d["_gex_b"] = sign * d["gamma"] * d[oi_col] * 100 * spot2 / scale
+        return d[["expiration", "_gex_b"]]
+
+    call_gex = _gex_col(calls, 1.0)
+    put_gex = _gex_col(puts, -1.0)
+
     rows = []
-    for exp in expirations:
-        c = calls[calls["expiration"] == exp]
-        p = puts[puts["expiration"] == exp] if not puts.empty and "expiration" in puts.columns else pd.DataFrame()
-        g = compute_gex(c, p, spot)
-        if not g.empty:
-            rows.append({
-                "Expiration": exp,
-                "Call GEX ($B)": float(g["call_gex_b"].sum()),
-                "Put GEX ($B)": float(g["put_gex_b"].sum()),
-                "Net GEX ($B)": float(g["net_gex_b"].sum()),
-            })
-    return pd.DataFrame(rows).sort_values("Expiration").reset_index(drop=True) if rows else pd.DataFrame()
+    if not call_gex.empty:
+        agg = call_gex.groupby("expiration")["_gex_b"].sum().reset_index()
+        agg.columns = ["Expiration", "Call GEX ($B)"]
+        rows.append(agg)
+    if not put_gex.empty:
+        agg = put_gex.groupby("expiration")["_gex_b"].sum().reset_index()
+        agg.columns = ["Expiration", "Put GEX ($B)"]
+        rows.append(agg)
+
+    if not rows:
+        return pd.DataFrame()
+
+    from functools import reduce
+    merged = reduce(lambda a, b: pd.merge(a, b, on="Expiration", how="outer"), rows)
+    merged = merged.fillna(0.0)
+    if "Call GEX ($B)" not in merged.columns:
+        merged["Call GEX ($B)"] = 0.0
+    if "Put GEX ($B)" not in merged.columns:
+        merged["Put GEX ($B)"] = 0.0
+    merged["Net GEX ($B)"] = merged["Call GEX ($B)"] + merged["Put GEX ($B)"]
+    return merged.sort_values("Expiration").reset_index(drop=True)
 
 
 def aggregate_dex_by_expiration(calls_df: pd.DataFrame, puts_df: pd.DataFrame,
                                 spot: float) -> pd.DataFrame:
-    """Return per-expiration DEX totals as a DataFrame."""
+    """Return per-expiration DEX totals as a DataFrame.
+
+    Computes delta once on the full chain then aggregates by expiration,
+    avoiding repeated Black-Scholes calls per expiration.
+    """
     calls = _normalize_options_df(calls_df)
     puts = _normalize_options_df(puts_df)
     if calls.empty or "expiration" not in calls.columns:
         return pd.DataFrame()
 
-    expirations = sorted(set(calls["expiration"].dropna().tolist()) | set(puts.get("expiration", pd.Series(dtype=str)).dropna().tolist()))
+    scale = 1e6
+
+    def _dex_col(df, side):
+        """Add per-row DEX to a normalised options DataFrame."""
+        if df.empty:
+            return pd.DataFrame()
+        d = df.copy()
+        if "delta" not in d.columns or d["delta"].isna().all() or (d["delta"] == 0).all():
+            d = _add_computed_delta(d, spot, option_type=side)
+        oi_col = "openinterest" if "openinterest" in d.columns else None
+        if oi_col is None or "delta" not in d.columns or "expiration" not in d.columns:
+            return pd.DataFrame()
+        d = d.dropna(subset=["delta", oi_col])
+        d = d[d[oi_col] > 0]
+        d["_dex_m"] = -d["delta"] * d[oi_col] * 100 / scale
+        return d[["expiration", "_dex_m"]]
+
+    call_dex = _dex_col(calls, "call")
+    put_dex = _dex_col(puts, "put")
+
     rows = []
-    for exp in expirations:
-        c = calls[calls["expiration"] == exp]
-        p = puts[puts["expiration"] == exp] if not puts.empty and "expiration" in puts.columns else pd.DataFrame()
-        d = compute_dex(c, p, spot)
-        if not d.empty:
-            rows.append({
-                "Expiration": exp,
-                "Call DEX (M)": float(d["call_dex_m"].sum()),
-                "Put DEX (M)": float(d["put_dex_m"].sum()),
-                "Net DEX (M)": float(d["net_dex_m"].sum()),
-            })
-    return pd.DataFrame(rows).sort_values("Expiration").reset_index(drop=True) if rows else pd.DataFrame()
+    if not call_dex.empty:
+        agg = call_dex.groupby("expiration")["_dex_m"].sum().reset_index()
+        agg.columns = ["Expiration", "Call DEX (M)"]
+        rows.append(agg)
+    if not put_dex.empty:
+        agg = put_dex.groupby("expiration")["_dex_m"].sum().reset_index()
+        agg.columns = ["Expiration", "Put DEX (M)"]
+        rows.append(agg)
+
+    if not rows:
+        return pd.DataFrame()
+
+    from functools import reduce
+    merged = reduce(lambda a, b: pd.merge(a, b, on="Expiration", how="outer"), rows)
+    merged = merged.fillna(0.0)
+    if "Call DEX (M)" not in merged.columns:
+        merged["Call DEX (M)"] = 0.0
+    if "Put DEX (M)" not in merged.columns:
+        merged["Put DEX (M)"] = 0.0
+    merged["Net DEX (M)"] = merged["Call DEX (M)"] + merged["Put DEX (M)"]
+    return merged.sort_values("Expiration").reset_index(drop=True)
 
 
 # ── GEX Calculation ──────────────────────────────────────────────────────────

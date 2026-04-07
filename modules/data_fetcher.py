@@ -601,6 +601,10 @@ def _fetch_options_chain_yfinance(ticker: str, refresh_bucket: str | None = None
     if not expirations:
         return None, None, None
 
+    # Limit to first 15 expirations (~6 months) — far-dated options have
+    # negligible gamma and fetching 50+ expirations adds seconds of latency.
+    expirations = expirations[:15]
+
     spot = None
     try:
         spot = tk.fast_info.get("lastPrice") or tk.fast_info.get("regularMarketPrice")
