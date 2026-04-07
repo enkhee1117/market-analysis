@@ -607,20 +607,11 @@ def compute_vix_beta(vix_df: pd.DataFrame, spy_df: pd.DataFrame,
 
 
 def plot_vix_beta(beta_df: pd.DataFrame, spy_df: pd.DataFrame | None = None) -> go.Figure:
-    """Rolling VIX beta chart with optional SPY price context."""
+    """Rolling VIX beta chart."""
     if beta_df.empty:
         return go.Figure()
 
-    spy_close = _spy_close_series(spy_df) if spy_df is not None else pd.Series(dtype=float)
-    has_spy = not spy_close.empty
-
-    fig = make_subplots(
-        rows=2 if has_spy else 1,
-        cols=1,
-        shared_xaxes=True,
-        row_heights=[0.65, 0.35] if has_spy else [1.0],
-        vertical_spacing=0.08,
-    )
+    fig = go.Figure()
 
     colors = {"20d": "#4C9BE8", "60d": "#F5E642", "120d": "#A575E8"}
     for col in beta_df.columns:
@@ -634,39 +625,25 @@ def plot_vix_beta(beta_df: pd.DataFrame, spy_df: pd.DataFrame | None = None) -> 
             line=dict(color=color, width=2 if "20d" in col else 1.5),
             opacity=1.0 if "20d" in col else 0.7,
             hovertemplate=f"Date: %{{x|%Y-%m-%d}}<br>VIX β ({window_label}): %{{y:.3f}}<extra></extra>",
-        ), row=1, col=1)
+        ))
 
     # Reference lines
-    fig.add_hline(y=0, line_dash="dash", line_color="rgba(255,255,255,0.3)", row=1, col=1)
+    fig.add_hline(y=0, line_dash="dash", line_color="rgba(255,255,255,0.3)")
     fig.add_hline(y=-1, line_dash="dot", line_color="rgba(255,255,255,0.2)",
-                  annotation_text="β = -1", annotation_position="right", row=1, col=1)
+                  annotation_text="β = -1", annotation_position="right")
 
     current_beta = beta_df.attrs.get("current_beta")
     title_suffix = f" (current: {current_beta:.3f})" if current_beta is not None else ""
 
-    if has_spy:
-        spy_close = spy_close[spy_close.index.isin(beta_df.index)]
-        if not spy_close.empty:
-            fig.add_trace(go.Scatter(
-                x=spy_close.index, y=spy_close.values,
-                name="SPY Close", mode="lines",
-                line=dict(color="#5FC97B", width=2),
-                hovertemplate="Date: %{x|%Y-%m-%d}<br>SPY: %{y:.2f}<extra></extra>",
-            ), row=2, col=1)
-
     fig.update_layout(
         title=f"SPY Rolling VIX Beta{title_suffix}",
         template="plotly_dark",
-        height=520 if has_spy else 380,
+        height=380,
         hovermode="x unified",
         legend=dict(orientation="h", y=1.08),
     )
-    fig.update_yaxes(title_text="VIX Beta (β)", row=1, col=1)
-    if has_spy:
-        fig.update_yaxes(title_text="SPY", row=2, col=1)
-        fig.update_xaxes(title_text="Date", row=2, col=1)
-    else:
-        fig.update_xaxes(title_text="Date", row=1, col=1)
+    fig.update_yaxes(title_text="VIX Beta (β)")
+    fig.update_xaxes(title_text="Date")
     return fig
 
 

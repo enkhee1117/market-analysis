@@ -56,7 +56,6 @@ from modules.gamma_exposure import (
     aggregate_gex_by_expiration,
     save_gamma_index_snapshot,
     load_gamma_index_history,
-    plot_price_with_gex_levels,
     plot_gex_profile,
     plot_gex_by_expiration,
     plot_gamma_index_timeline,
@@ -592,54 +591,12 @@ def _render_gex_tab():
             ])
         )
 
-    # ── Dynamic interpretation banner ─────────────────────────────────────
     gi_val = gamma_idx.get("gamma_index", 0)
     gi_cond = gamma_idx.get("gamma_condition", "N/A")
     gi_tilt = gamma_idx.get("gamma_tilt", 0.5)
     gi_conc = gamma_idx.get("gamma_concentration", 0)
     cw = gamma_idx.get("call_wall")
     pw = gamma_idx.get("put_wall")
-
-    _interp_parts = []
-    if gi_val > 0:
-        _interp_parts.append(
-            f"**{gex_ticker}** screens as **positive gamma** ({gi_val:+.3f}B) in the current lens. "
-            f"That usually means more mean-reversion and pinning pressure."
-        )
-    elif gi_val < 0:
-        _interp_parts.append(
-            f"**{gex_ticker}** screens as **negative gamma** ({gi_val:+.3f}B) in the current lens. "
-            f"That usually means faster directional moves and less damping."
-        )
-    else:
-        _interp_parts.append(f"**{gex_ticker}** gamma is **roughly neutral** in the active slice.")
-
-    if flip is not None:
-        _flip_dist = ((spot - flip) / spot) * 100
-        _flip_dir = "above" if _flip_dist > 0 else "below"
-        _interp_parts.append(
-            f"Spot ${spot:.2f} is **{abs(_flip_dist):.1f}% {_flip_dir}** "
-            f"the gamma flip at ${flip:.2f}."
-        )
-
-    if cw and pw:
-        _interp_parts.append(
-            f"Key range: **${pw:,.0f}** (put wall / support) to "
-            f"**${cw:,.0f}** (call wall / resistance)."
-        )
-
-    if gi_conc > 0.5:
-        _interp_parts.append(
-            f"Gamma is **heavily concentrated** ({gi_conc:.0%}) near spot — strong pin risk."
-        )
-
-    if confidence["label"] == "Low":
-        _interp_parts.append(
-            "Treat this as a low-confidence heuristic read because the filtered slice is thin or highly assumption-driven."
-        )
-
-    _banner_type = "success" if gi_val > 0 else ("warning" if gi_val < 0 else "info")
-    getattr(st, _banner_type)("  \n".join(_interp_parts))
 
     # ── Gamma Index metrics row ───────────────────────────────────────────
     st.subheader("Gamma Index")
@@ -683,17 +640,6 @@ def _render_gex_tab():
                 .map(_ts_color, subset=["Net GEX ($B)"]),
                 use_container_width=True, hide_index=True,
             )
-
-    # ── Price chart with GEX levels ──────────────────────────────────────
-    # Use the underlying ticker for price data (SPX → ^GSPC)
-    _price_ticker = "^GSPC" if gex_ticker == "SPX" else gex_ticker
-    _price_hist = fetch_price_history(_price_ticker, period="1mo", interval="1d", refresh_bucket=_price_bucket)
-    fig_price = plot_price_with_gex_levels(
-        _price_hist, spot, gex_ticker,
-        call_wall=cw, put_wall=pw, gamma_flip=flip,
-        top_strikes=top_strikes,
-    )
-    st.plotly_chart(fig_price, use_container_width=True)
 
     fig_gi_timeline = plot_gamma_index_timeline(gex_ticker)
     st.plotly_chart(fig_gi_timeline, use_container_width=True)
