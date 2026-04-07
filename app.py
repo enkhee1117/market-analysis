@@ -37,7 +37,7 @@ from modules.day_of_week import (
     plot_win_rate_comparison,
     plot_dow_distribution,
     plot_cumulative_by_dow,
-    plot_conditional_heatmap,
+    build_conditional_table,
     plot_conditional_distribution,
     TIMEFRAMES,
     RETURN_TYPES,
@@ -360,11 +360,45 @@ def _render_dow_tab():
     st.subheader("Scenario Analysis: What Happens Next?")
     st.caption("If a day closes red or green, what is the probability of the next day being up or down?")
 
-    # Overview heatmap
+    # Overview table
     cond_probs = compute_conditional_probabilities(dow_data, return_col=return_col)
     if not cond_probs.empty:
-        fig_heatmap = plot_conditional_heatmap(cond_probs)
-        st.plotly_chart(fig_heatmap, use_container_width=True)
+        cond_table = build_conditional_table(cond_probs)
+        if not cond_table.empty:
+            def _color_pct(v):
+                try:
+                    f = float(v)
+                    if f > 55:
+                        return "color: #5FC97B; font-weight: bold"
+                    elif f < 45:
+                        return "color: #E85C5C; font-weight: bold"
+                except (TypeError, ValueError):
+                    pass
+                return ""
+
+            def _color_avg(v):
+                try:
+                    f = float(v)
+                    if f > 0:
+                        return "color: #5FC97B"
+                    elif f < 0:
+                        return "color: #E85C5C"
+                except (TypeError, ValueError):
+                    pass
+                return ""
+
+            st.dataframe(
+                cond_table.style
+                    .format({
+                        "After Green: P(Up)": "{:.0f}%",
+                        "After Red: P(Up)": "{:.0f}%",
+                        "After Green: Avg": "{:+.3f}%",
+                        "After Red: Avg": "{:+.3f}%",
+                    })
+                    .map(_color_pct, subset=["After Green: P(Up)", "After Red: P(Up)"])
+                    .map(_color_avg, subset=["After Green: Avg", "After Red: Avg"]),
+                use_container_width=True, hide_index=True,
+            )
 
     # Chain builder
     st.markdown("##### Build a Scenario Chain")

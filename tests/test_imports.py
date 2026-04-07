@@ -49,7 +49,7 @@ def test_day_of_week_exports():
         plot_win_rate_comparison,
         plot_dow_distribution,
         plot_cumulative_by_dow,
-        plot_conditional_heatmap,
+        build_conditional_table,
         plot_conditional_distribution,
         TIMEFRAMES,
         RETURN_TYPES,
@@ -59,7 +59,7 @@ def test_day_of_week_exports():
     assert len(RETURN_TYPES) == 3, "Expected Close-to-Close, Intraday, Overnight"
     assert callable(compute_conditional_probabilities)
     assert callable(compute_conditional_chain)
-    assert callable(plot_conditional_heatmap)
+    assert callable(build_conditional_table)
     assert callable(plot_conditional_distribution)
 
 

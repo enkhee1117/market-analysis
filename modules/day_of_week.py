@@ -368,75 +368,36 @@ def compute_conditional_chain(df: pd.DataFrame,
     }
 
 
-def plot_conditional_heatmap(prob_df: pd.DataFrame) -> go.Figure:
-    """Annotated heatmap: rows = weekday, columns = 'After Green' / 'After Red'.
+def build_conditional_table(prob_df: pd.DataFrame) -> pd.DataFrame:
+    """Build a clean DataFrame for display: rows = weekday pairs, columns = key stats.
 
-    Each cell shows P(next day green) with color scale from red (<45%)
-    through yellow (50%) to green (>55%), annotated with probability,
-    mean return, and sample count.
+    Returns a styled-ready DataFrame with columns:
+        Today, Tomorrow, After Green (P green), After Green (Avg),
+        After Red (P green), After Red (Avg), with sample counts.
     """
     if prob_df.empty:
-        return go.Figure()
+        return pd.DataFrame()
 
     days_order = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"]
-    cols_order = ["green", "red"]
-    col_labels = ["After Green Day", "After Red Day"]
+    next_day = {"Monday": "Tuesday", "Tuesday": "Wednesday",
+                "Wednesday": "Thursday", "Thursday": "Friday", "Friday": "Monday"}
 
-    # Build z-matrix (P_Green) and text-matrix
-    z = []
-    text = []
+    rows = []
     for day in days_order:
-        z_row = []
-        text_row = []
-        for color in cols_order:
-            row = prob_df[(prob_df["Today"] == day) & (prob_df["Today_Color"] == color)]
-            if row.empty:
-                z_row.append(50)
-                text_row.append("N/A")
+        row = {"If This Day": day, "Then Next": next_day[day]}
+        for color, label in [("green", "Green"), ("red", "Red")]:
+            match = prob_df[(prob_df["Today"] == day) & (prob_df["Today_Color"] == color)]
+            if match.empty:
+                row[f"After {label}: P(Up)"] = None
+                row[f"After {label}: Avg"] = None
+                row[f"After {label}: n"] = None
             else:
-                r = row.iloc[0]
-                z_row.append(r["P_Green"])
-                text_row.append(
-                    f"<b>{r['P_Green']:.0f}%</b> green<br>"
-                    f"{r['Mean_Next']:+.3f}% avg<br>"
-                    f"n={r['Count']}"
-                )
-        z.append(z_row)
-        text.append(text_row)
-
-    # Rows = days (bottom-to-top in heatmap), so reverse for top-to-bottom reading
-    z = z[::-1]
-    text = text[::-1]
-    y_labels = [f"{d} →" for d in days_order[::-1]]
-
-    fig = go.Figure(go.Heatmap(
-        z=z,
-        x=col_labels,
-        y=y_labels,
-        text=text,
-        texttemplate="%{text}",
-        textfont=dict(size=12),
-        colorscale=[
-            [0.0, "#E85C5C"],   # red at 0%
-            [0.45, "#E85C5C"],  # still red below 45%
-            [0.50, "#F5E642"],  # yellow at 50%
-            [0.55, "#F5E642"],  # still yellow around 50%
-            [1.0, "#5FC97B"],   # green at 100%
-        ],
-        zmin=35,
-        zmax=70,
-        colorbar=dict(title="P(Green)", ticksuffix="%"),
-        hovertemplate="<b>%{y} %{x}</b><br>P(Next Green): %{z:.1f}%<extra></extra>",
-    ))
-
-    fig.update_layout(
-        title="If Today Is Green/Red → Probability Next Day Is Green",
-        template="plotly_dark",
-        height=380,
-        xaxis=dict(side="top"),
-        yaxis=dict(autorange="reversed"),
-    )
-    return fig
+                m = match.iloc[0]
+                row[f"After {label}: P(Up)"] = m["P_Green"]
+                row[f"After {label}: Avg"] = m["Mean_Next"]
+                row[f"After {label}: n"] = int(m["Count"])
+        rows.append(row)
+    return pd.DataFrame(rows)
 
 
 def plot_conditional_distribution(returns: pd.Series, chain_label: str) -> go.Figure:
