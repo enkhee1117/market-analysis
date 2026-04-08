@@ -228,9 +228,9 @@ def _add_computed_gamma(df: pd.DataFrame, spot: float, r: float = 0.05) -> pd.Da
     # Parse expiration → time to expiry in years (vectorized)
     today = datetime.now().date()
     if "expiration" in df.columns:
-        exp_dates = pd.to_datetime(df["expiration"], errors="coerce").dt.date
-        days = np.array([(d - today).days if d is not None else 0 for d in exp_dates])
-        df["T"] = np.maximum(days, 0) / 365.0
+        exp_ts = pd.to_datetime(df["expiration"], errors="coerce")
+        delta_days = (exp_ts - pd.Timestamp(today)).dt.days.fillna(0).astype(int)
+        df["T"] = np.maximum(delta_days.values, 0) / 365.0
     else:
         df["T"] = 30 / 365.0  # fallback 30 days
 
@@ -278,9 +278,9 @@ def _add_computed_delta(df: pd.DataFrame, spot: float, option_type: str = "call"
     today = datetime.now().date()
     exp_col = cols_lower.get("expiration")
     if exp_col and exp_col in df.columns:
-        exp_dates = pd.to_datetime(df[exp_col], errors="coerce").dt.date
-        days = np.array([(d - today).days if d is not None else 0 for d in exp_dates])
-        df["_T"] = np.maximum(days, 0) / 365.0
+        exp_ts = pd.to_datetime(df[exp_col], errors="coerce")
+        delta_days = (exp_ts - pd.Timestamp(today)).dt.days.fillna(0).astype(int)
+        df["_T"] = np.maximum(delta_days.values, 0) / 365.0
     else:
         df["_T"] = 30 / 365.0
 
