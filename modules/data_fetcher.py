@@ -7,7 +7,7 @@ import os
 import json
 import glob
 import time
-from datetime import datetime, timedelta, date
+from datetime import datetime, timedelta, date, timezone
 import streamlit as st
 
 
@@ -47,7 +47,7 @@ def get_refresh_bucket(dataset: str = "price", interval: str = "1d",
     Options chains are refreshed every 5 minutes during market hours.
     Outside market hours we reuse a daily bucket.
     """
-    now = now or datetime.utcnow()
+    now = now or datetime.now(timezone.utc)
     if not _is_market_open_now():
         return now.strftime("%Y%m%d")
 
@@ -60,7 +60,7 @@ def get_refresh_bucket(dataset: str = "price", interval: str = "1d",
 
     epoch_minutes = int(now.timestamp() // 60)
     bucket_start = epoch_minutes - (epoch_minutes % bucket_minutes)
-    bucket_dt = datetime.utcfromtimestamp(bucket_start * 60)
+    bucket_dt = datetime.fromtimestamp(bucket_start * 60, tz=timezone.utc)
     return bucket_dt.strftime("%Y%m%d%H%M")
 
 
