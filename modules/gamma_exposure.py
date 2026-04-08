@@ -336,8 +336,13 @@ def compute_dex(calls_df: pd.DataFrame, puts_df: pd.DataFrame,
         d = df.copy()
         d.columns = [c.lower() for c in d.columns]
 
-        # Compute delta from B-S if not present
-        if "delta" not in d.columns or d["delta"].isna().all() or (d["delta"] == 0).all():
+        # Compute delta from B-S if not present or mostly zero
+        delta_missing = (
+            "delta" not in d.columns
+            or d["delta"].isna().all()
+            or (d["delta"] == 0).mean() > 0.5
+        )
+        if delta_missing:
             d = _add_computed_delta(d, spot, option_type=side)
 
         if "openinterest" not in d.columns:
@@ -574,7 +579,7 @@ def aggregate_gex_by_expiration(calls_df: pd.DataFrame, puts_df: pd.DataFrame,
         if df.empty:
             return pd.DataFrame()
         d = df.copy()
-        if "gamma" not in d.columns or d["gamma"].isna().all() or (d["gamma"] == 0).all():
+        if "gamma" not in d.columns or d["gamma"].isna().all() or (d["gamma"] == 0).mean() > 0.5:
             d = _add_computed_gamma(d, spot)
         oi_col = "openinterest" if "openinterest" in d.columns else None
         if oi_col is None or "gamma" not in d.columns or "expiration" not in d.columns:
@@ -630,7 +635,7 @@ def aggregate_dex_by_expiration(calls_df: pd.DataFrame, puts_df: pd.DataFrame,
         if df.empty:
             return pd.DataFrame()
         d = df.copy()
-        if "delta" not in d.columns or d["delta"].isna().all() or (d["delta"] == 0).all():
+        if "delta" not in d.columns or d["delta"].isna().all() or (d["delta"] == 0).mean() > 0.5:
             d = _add_computed_delta(d, spot, option_type=side)
         oi_col = "openinterest" if "openinterest" in d.columns else None
         if oi_col is None or "delta" not in d.columns or "expiration" not in d.columns:
@@ -691,8 +696,13 @@ def compute_gex(calls_df: pd.DataFrame, puts_df: pd.DataFrame, spot: float) -> p
         df = df.copy()
         df.columns = [c.lower() for c in df.columns]
 
-        # Compute gamma from B-S if not present
-        if "gamma" not in df.columns or df["gamma"].isna().all() or (df["gamma"] == 0).all():
+        # Compute gamma from B-S if not present or mostly zero
+        gamma_missing = (
+            "gamma" not in df.columns
+            or df["gamma"].isna().all()
+            or (df["gamma"] == 0).mean() > 0.5
+        )
+        if gamma_missing:
             df = _add_computed_gamma(df, spot)
 
         if "openinterest" not in df.columns:
