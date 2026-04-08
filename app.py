@@ -9,6 +9,16 @@ Market Analysis Dashboard
 """
 
 import streamlit as st
+import sys
+import traceback as _tb
+
+def _crash_handler(etype, val, tb):
+    """Show full traceback in the app instead of generic error page."""
+    st.error(f"**{etype.__name__}**: {val}")
+    st.code("".join(_tb.format_exception(etype, val, tb)))
+
+sys.excepthook = _crash_handler
+
 import pandas as pd
 import numpy as np
 from datetime import date
