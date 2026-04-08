@@ -10,7 +10,7 @@ from scipy.stats import norm
 import os
 import json
 
-# Force Streamlit Cloud redeploy — module version 2026-03-29
+# Force Streamlit Cloud redeploy — module version 2026-04-08
 
 INDEX_LIKE_TICKERS = {"SPY", "SPX", "QQQ", "IWM", "DIA"}
 
