@@ -422,7 +422,6 @@ def _massive_get(endpoint: str, params: dict | None = None) -> dict | None:
     return None  # should not reach here
 
 
-@st.cache_data(ttl=86400)
 def fetch_options_chain_massive(ticker: str, refresh_bucket: str | None = None):
     """
     Fetch full options chain from Massive.com API.
