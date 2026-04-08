@@ -6,4 +6,4 @@ plotly
 scipy
 pyarrow
 requests
-supabase
+tzdata
