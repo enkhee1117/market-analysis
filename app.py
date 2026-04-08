@@ -9,25 +9,28 @@ Market Analysis Dashboard
 """
 
 import streamlit as st
-import pandas as pd
-import numpy as np
-from datetime import date
 
-from modules.data_fetcher import (
-    fetch_price_history,
-    fetch_multi_tickers,
-    fetch_options_chain,
-    load_historical_options_chain,
-    clear_today_cache,
-    get_refresh_bucket,
-    TIMEFRAME_MAP,
-)
-from modules.supabase_cache import (
-    get_data_freshness,
-    data_staleness_info,
-    is_market_open,
-)
-from modules.day_of_week import (
+# ── Diagnostic wrapper for Streamlit Cloud (reveals redacted tracebacks) ─────
+try:
+    import pandas as pd
+    import numpy as np
+    from datetime import date
+
+    from modules.data_fetcher import (
+        fetch_price_history,
+        fetch_multi_tickers,
+        fetch_options_chain,
+        load_historical_options_chain,
+        clear_today_cache,
+        get_refresh_bucket,
+        TIMEFRAME_MAP,
+    )
+    from modules.supabase_cache import (
+        get_data_freshness,
+        data_staleness_info,
+        is_market_open,
+    )
+    from modules.day_of_week import (
     compute_dow_returns,
     filter_by_timeframe,
     dow_summary,
@@ -90,6 +93,12 @@ from modules.seasonality import (
     plot_intramonth_bar,
     plot_annual_return_bar,
 )
+except Exception as _import_err:
+    st.error(f"Import failed: {_import_err}")
+    st.code(f"{type(_import_err).__name__}: {_import_err}")
+    import traceback
+    st.code(traceback.format_exc())
+    st.stop()
 
 
 # ── Page Config ───────────────────────────────────────────────────────────────
