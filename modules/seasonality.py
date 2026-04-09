@@ -188,9 +188,12 @@ def plot_monthly_heatmap(pivot_df: pd.DataFrame) -> go.Figure:
 
 
 def plot_weekly_bar(weekly_df: pd.DataFrame) -> go.Figure:
-    """Bar chart: mean return per week-of-year."""
+    """Bar chart: mean return per week-of-year with current week highlighted."""
+    from datetime import date
     if weekly_df.empty:
         return go.Figure()
+
+    current_week = date.today().isocalendar()[1]
 
     colors = ["#5FC97B" if v >= 0 else "#E85C5C" for v in weekly_df["Mean %"]]
 
@@ -209,6 +212,21 @@ def plot_weekly_bar(weekly_df: pd.DataFrame) -> go.Figure:
     ))
 
     fig.add_hline(y=0, line_dash="dash", line_color="rgba(255,255,255,0.3)")
+
+    # Mark current week
+    if current_week in weekly_df["Week"].values:
+        cw_row = weekly_df[weekly_df["Week"] == current_week].iloc[0]
+        fig.add_vline(
+            x=current_week, line_dash="dot", line_color="white", line_width=2,
+        )
+        fig.add_annotation(
+            x=current_week, y=cw_row["Mean %"],
+            text=f"← We are here (Week {current_week})",
+            showarrow=False,
+            font=dict(color="white", size=12, family="monospace"),
+            xanchor="left", xshift=8,
+            bgcolor="rgba(0,0,0,0.6)", borderpad=3,
+        )
 
     fig.update_layout(
         title="SPY Seasonality by Week of Year",
