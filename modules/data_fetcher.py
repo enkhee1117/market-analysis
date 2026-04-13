@@ -260,6 +260,7 @@ def fetch_price_history(
 
     df = yf.download(ticker, period=period, interval=interval, auto_adjust=True, progress=False)
     if df.empty:
+        st.cache_data.clear()  # don't cache empty results for 24h
         return df
     df.index = pd.to_datetime(df.index)
     if df.index.tz is not None:
@@ -627,7 +628,7 @@ def _fetch_options_chain_yfinance(ticker: str, refresh_bucket: str | None = None
             puts["expiration"] = exp
             all_calls.append(calls)
             all_puts.append(puts)
-            time.sleep(0.05)
+            time.sleep(0.2)
         except Exception:
             continue
 
